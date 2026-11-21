@@ -39,7 +39,7 @@ Most battery widgets show a row of equal numbers and leave the thinking to you. 
 
 ## Supported devices
 
-The device protocols come from the community-built [BatteryHub](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor) project, ported to Rust with its byte-for-byte tests: **86 drivers and 378 tests**.
+The device protocols come from the community-built [BatteryHub](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor) project, ported to Rust with its byte-for-byte tests: **77 brand drivers, 4 generic readers and 378 tests**.
 
 | Kind | Brands (selection) |
 |---|---|
@@ -47,7 +47,7 @@ The device protocols come from the community-built [BatteryHub](https://github.c
 | Headsets | Logitech G, HyperX, SteelSeries Arctis Nova Elite, Razer BlackShark / Barracuda, ASTRO, Audeze, Jabra, JBL Quantum, Poly, Turtle Beach, AKG, Sony INZONE, Fractal, ENDORFY, Alienware |
 | Keyboards | Keychron, Royal Kludge, NuPhy, Akko, AULA, Cherry, ATK / VGN, SONiX, PMO, Machenike, Redragon, DAREU, DARKRIM |
 | Any brand | Bluetooth devices Windows already reads, HID devices with a standard battery report, Xbox controllers |
-| Phone | Android / iPhone through Microsoft Phone Link |
+| Phone | The phone linked in Microsoft Phone Link (when Phone Link shows its battery) |
 
 **Honest status:** the Logitech driver and Phone Link are verified on real hardware. The other drivers are faithful ports with passing tests but have not been tried on a device yet. If yours works (or doesn't), please [open an issue](https://github.com/joshsegatt/BatteryLife/issues/new): every report moves a driver from "ported" to "verified".
 
@@ -61,7 +61,7 @@ BatteryHub is the project whose device research made BatteryLife possible, and i
 | Where it shows | Tray icon + hub panel (official Windows APIs) | Text strip injected into the taskbar, always visible |
 | Time-left estimate | In the panel and the notification | In the history viewer |
 | Battery history chart | Not yet | Yes (24 h / 7 d / 30 d) |
-| Device coverage | 86 drivers ported, most not yet hardware-verified | About 100 drivers, many hardware-verified |
+| Device coverage | 77 brand drivers ported, most not yet hardware-verified | About 100 drivers, many hardware-verified |
 | Crash isolation | Drivers run in a separate process, in parallel, each with a deadline | One process, drivers polled in sequence |
 | Memory safety | Device parsing in Rust | C++ |
 | Size and memory | Core about 1 MB of RAM; the WinUI app about 90 MB and 160 MB installed | About 2 MB of RAM, about 350 KB |
