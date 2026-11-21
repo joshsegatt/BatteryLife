@@ -58,7 +58,8 @@ jobs:
           Copy-Item LICENSE, README.md $out
           $zip = "BatteryLife-$env:GITHUB_REF_NAME-win-x64.zip"
           Compress-Archive -Path "$out\*" -DestinationPath $zip
-          (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" | Set-Content "$zip.sha256" -Encoding ascii
+          # LF line ending, so "sha256sum -c" on Linux or WSL reads it too.
+          [IO.File]::WriteAllText("$PWD/$zip.sha256", (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip`n")
           "ZIP=$zip" >> $env:GITHUB_ENV
 
       - name: Publish the release
