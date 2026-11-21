@@ -28,8 +28,8 @@ Most battery widgets show a row of equal numbers and leave the thinking to you. 
 
 ## Features
 
+- Your devices inside the taskbar, next to the clock: pictogram and level for up to 4 devices, a yellow plate only on the one that needs charging. A click opens the hub; it never covers your app buttons
 - Tray icon with the level of the device that runs out first, yellow only when it needs charging
-- One more tray icon per device (up to 4): its pictogram over a level bar, yellow when that device needs charging. Drag them out of the **^** area to keep them on the taskbar; a click opens the hub
 - Hub panel in the airport-sign design: next action, every device, charging state, time left
 - Estimated time left from observed drain (needs about 20 minutes of history)
 - Low-battery notification at 15%, with no repeats while the level hovers
@@ -59,7 +59,7 @@ BatteryHub is the project whose device research made BatteryLife possible, and i
 | | BatteryLife | BatteryHub |
 |---|---|---|
 | Main idea | Tells you the next thing to charge and the time left | Shows every level on the taskbar |
-| Where it shows | Tray icon + hub panel (official Windows APIs) | Text strip injected into the taskbar, always visible |
+| Where it shows | Strip inside the taskbar (same technique as BatteryHub) + tray icon + hub panel | Text strip inside the taskbar, always visible |
 | Time-left estimate | In the panel and the notification | In the history viewer |
 | Battery history chart | Not yet | Yes (24 h / 7 d / 30 d) |
 | Device coverage | 77 brand drivers ported, most not yet hardware-verified | About 100 drivers, many hardware-verified |
@@ -97,7 +97,7 @@ Prefer no installer? The release also has a portable `BatteryLife-<version>-win-
 
    Then run `app/BatteryLife.App/bin/x64/Release/net10.0-windows10.0.22621.0/win-x64/BatteryLife.exe`.
 
-Windows puts new tray icons behind the **^** arrow. On first launch BatteryLife shows a notification with a **Pin to taskbar** button. You can also drag the icon from the **^** area onto the taskbar.
+Your devices show inside the taskbar, next to the clock; right-click them to turn that off. The BatteryLife tray icon itself starts behind the **^** arrow, like every new tray icon: the first-launch notification has a **Pin to taskbar** button, or drag it from the **^** area onto the taskbar.
 
 The reader also works on its own: `batterylife-core --list`, `--json`, or `--watch [seconds]` for one JSON line per poll.
 
@@ -105,7 +105,7 @@ The reader also works on its own: `batterylife-core --list`, `--json`, or `--wat
 
 ```
 BatteryLife.exe (C#, WinUI 3)            batterylife-core.exe (Rust)
- tray icon, panel, alerts   <-- JSON --   registry -> drivers in parallel -> tracker
+ taskbar strip, tray, panel <-- JSON --   registry -> drivers in parallel -> tracker
                             -- refresh ->  (HID, Bluetooth, Xbox, Phone Link)
 ```
 

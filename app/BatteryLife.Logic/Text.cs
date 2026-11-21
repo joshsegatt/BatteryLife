@@ -120,8 +120,8 @@ public sealed class Text
 
     public string WelcomeTitle => T("O BatteryLife está na bandeja", "BatteryLife is in the tray");
     public string WelcomeBody => T(
-        "Para ver a bateria sempre, abra a seta ^ perto do relógio e arraste para a barra os ícones do BatteryLife: um geral e um por aparelho.",
-        "To always see your battery, open the ^ arrow next to the clock and drag the BatteryLife icons onto the taskbar: one overall, one per device.");
+        "Seus aparelhos aparecem na barra de tarefas, ao lado do relógio. Clique neles para abrir o painel.",
+        "Your devices show on the taskbar, next to the clock. Click them to open the hub.");
 
     public string NotificationTitle(DeviceReading d) => T($"{d.Name} com {d.Percent}%", $"{d.Name} at {d.Percent}%");
     public string NotificationBody(DeviceReading d) => d.MinutesLeft is int m
@@ -144,5 +144,6 @@ public sealed class Text
     }
 
     public string Open => T("Abrir", "Open");
+    public string ShowOnTaskbar => T("Mostrar na barra de tarefas", "Show on the taskbar");
     public string PinIcon => T("Fixar na barra", "Pin to taskbar");
 }
