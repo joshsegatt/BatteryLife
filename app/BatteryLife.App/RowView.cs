@@ -49,7 +49,8 @@ public static class RowView
             Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Right,
             Spacing = 4,
-            Opacity = dim,
+            // A yellow tag is an instruction: never dimmed, even on a last known value.
+            Opacity = Text.NeedsCharge(d) ? 1.0 : dim,
         };
         if (d.Charging) levelLine.Children.Add(Icon("", 14, "SignTextBrush"));
         if (Text.NeedsCharge(d))

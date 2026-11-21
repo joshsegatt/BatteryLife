@@ -83,7 +83,9 @@ public partial class App : Application
         // A contrast theme switched on while running repaints the code-built parts right away.
         Palette.Ui.ColorValuesChanged += (_, _) => _ui.TryEnqueue(() =>
         {
-            if (_lastBoard is not null) _flyout.Render(_lastBoard, animate: false);
+            if (_lastBoard is null) return;
+            _flyout.Render(_lastBoard, animate: false);
+            if (_tray is not null) _tray.IconSource = TrayIcon(_lastBoard);
         });
 
         var argv = Environment.GetCommandLineArgs();
@@ -152,8 +154,9 @@ public partial class App : Application
             FontFamily = new FontFamily("Segoe UI Variable Display"),
             FontWeight = FontWeights.Bold,
             FontSize = text.Length switch { >= 3 => 26, 2 => 34, _ => 40 },
-            Foreground = new SolidColorBrush(action ? Microsoft.UI.ColorHelper.FromArgb(255, 0x11, 0x11, 0x11) : Microsoft.UI.Colors.White),
-            Background = new SolidColorBrush(action ? Microsoft.UI.ColorHelper.FromArgb(255, 0xFF, 0xD2, 0x00) : Microsoft.UI.ColorHelper.FromArgb(255, 0x1C, 0x1C, 0x1C)),
+            // Same sign brushes as the panel, so a contrast theme recolors the tray icon too.
+            Foreground = Palette.Brush(action ? "SignInkBrush" : "SignTextBrush"),
+            Background = Palette.Brush(action ? "SignYellowBrush" : "SignRaisedBrush"),
             CornerRadius = new CornerRadius(6),
             Size = 64,
         };

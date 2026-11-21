@@ -42,8 +42,11 @@ public sealed partial class FlyoutWindow : Window
         var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
         int round = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); // DWMWA_WINDOW_CORNER_PREFERENCE
-        int border = 0x002A2A2A; // COLORREF 0x00BBGGRR
-        DwmSetWindowAttribute(hwnd, 34, ref border, sizeof(int)); // DWMWA_BORDER_COLOR
+        if (!Palette.HighContrast) // a contrast theme keeps the system's own border color
+        {
+            int border = 0x002A2A2A; // COLORREF 0x00BBGGRR
+            DwmSetWindowAttribute(hwnd, 34, ref border, sizeof(int)); // DWMWA_BORDER_COLOR
+        }
         Activated += (_, e) =>
         {
             if (e.WindowActivationState == WindowActivationState.Deactivated && !Pinned) Hide();

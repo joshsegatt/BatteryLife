@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-21T14:30:00Z",
+  "title": "Design System: BatteryLife",
+  "extensions": {
+    "colorMeta": {
+      "sign-yellow": { "role": "primary", "displayName": "Signal Yellow", "canonical": "#FFD200", "highContrast": "SystemColorHighlightColor", "tonalRamp": ["#2E2600", "#4F4100", "#735F00", "#9A7F00", "#C4A200", "#FFD200", "#FFE466", "#FFF4C2"] },
+      "sign-ink": { "role": "neutral", "displayName": "Sign Ink", "canonical": "#111111", "highContrast": "SystemColorHighlightTextColor", "tonalRamp": ["#000000", "#111111", "#1C1C1C", "#2A2A2A", "#4A4A4A", "#7A7A7A", "#A8A8A8", "#E6E6E6"] },
+      "sign-ground": { "role": "neutral", "displayName": "Night Ground", "canonical": "#111111", "highContrast": "SystemColorWindowColor", "tonalRamp": ["#000000", "#111111", "#1C1C1C", "#2A2A2A", "#4A4A4A", "#7A7A7A", "#A8A8A8", "#E6E6E6"] },
+      "sign-raised": { "role": "neutral", "displayName": "Raised Plate", "canonical": "#1C1C1C", "highContrast": "SystemColorWindowColor", "tonalRamp": ["#000000", "#111111", "#1C1C1C", "#2A2A2A", "#4A4A4A", "#7A7A7A", "#A8A8A8", "#E6E6E6"] },
+      "sign-rule": { "role": "neutral", "displayName": "Hairline Rule", "canonical": "#2A2A2A", "highContrast": "SystemColorWindowTextColor", "tonalRamp": ["#000000", "#111111", "#1C1C1C", "#2A2A2A", "#4A4A4A", "#7A7A7A", "#A8A8A8", "#E6E6E6"] },
+      "sign-text": { "role": "neutral", "displayName": "Sign White", "canonical": "#FFFFFF", "highContrast": "SystemColorWindowTextColor", "tonalRamp": ["#1C1C1C", "#3A3A3A", "#5C5C5C", "#808080", "#A8A8A8", "#CFCFCF", "#EDEDED", "#FFFFFF"] },
+      "sign-muted": { "role": "neutral", "displayName": "Quiet Grey", "canonical": "#A8A8A8", "highContrast": "SystemColorWindowTextColor", "tonalRamp": ["#1C1C1C", "#2A2A2A", "#4A4A4A", "#6A6A6A", "#8A8A8A", "#A8A8A8", "#CFCFCF", "#EDEDED"] }
+    },
+    "typographyMeta": {
+      "figure": { "displayName": "Figure", "purpose": "The band's time left or level; digits only. Monumental, number-first." },
+      "figure-unit": { "displayName": "Figure unit", "purpose": "Units inside the figure (h, min, dias), smaller and lighter than the digits." },
+      "level": { "displayName": "Level", "purpose": "A row's percent, right-aligned." },
+      "level-tag": { "displayName": "Level tag", "purpose": "A row's percent on the yellow tag when that device needs charging." },
+      "headline": { "displayName": "Headline", "purpose": "The band's one-line instruction, sentence case, up to 2 lines." },
+      "title": { "displayName": "Title", "purpose": "Device name in a row." },
+      "body": { "displayName": "Body", "purpose": "Band detail line, row subtitle (kind · state), footer." },
+      "caption": { "displayName": "Caption", "purpose": "Row time left under the level." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "panel-rise", "value": "translateY 14px -> 0, 260ms, ExponentialEase EaseOut exponent 6", "purpose": "Panel opens from the taskbar like Quick Settings." },
+      { "name": "panel-fade", "value": "opacity 0 -> 1, 160ms, linear", "purpose": "Runs with panel-rise on open." },
+      { "name": "flap-down", "value": "PlaneProjection.RotationX 0 -> -90deg, 110ms, ExponentialEase EaseIn exponent 4", "purpose": "First half of the split-flap band turn; all values swap at the fold." },
+      { "name": "flap-up", "value": "PlaneProjection.RotationX 90deg -> 0, 220ms, ExponentialEase EaseOut exponent 5", "purpose": "Second half of the split-flap band turn." },
+      { "name": "reduced-motion", "value": "UISettings.AnimationsEnabled == false -> instant", "purpose": "Windows animation effects off: no rise, no fade, no flap; the plate swaps instantly." }
+    ],
+    "breakpoints": [],
+    "platform": {
+      "target": "Windows 11, WinUI 3 (C#)",
+      "tokenSource": "app/BatteryLife.App/App.xaml ThemeDictionaries (Default, HighContrast), read in code via Palette.Brush",
+      "panelWidth": "380 DIP, height sized to content",
+      "panelMargin": "12 DIP from the work-area corner of the monitor under the cursor",
+      "frame": "DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND, DWMWA_BORDER_COLOR = #2A2A2A",
+      "asleepOpacity": 0.55
+    }
+  },
+  "components": [
+    {
+      "name": "Sign band, action",
+      "kind": "custom",
+      "refersTo": "band-action",
+      "description": "The single next decision when a device needs charging: yellow plate, ink type, white pictogram on an ink square.",
+      "html": "<div class=\"ds-band ds-band-action\"><div class=\"ds-band-picto\"><svg width=\"28\" height=\"28\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"1.5\"><path d=\"M4 14v-2a8 8 0 0 1 16 0v2\"/><rect x=\"3.5\" y=\"14\" width=\"4\" height=\"6\" rx=\"1\"/><rect x=\"16.5\" y=\"14\" width=\"4\" height=\"6\" rx=\"1\"/></svg></div><div class=\"ds-band-text\"><div class=\"ds-band-headline\">Carregue o headset antes de jogar</div><div class=\"ds-band-figure\">2<span>h</span> 10<span>min</span></div><div class=\"ds-band-detail\">Cloud III Wireless · 14% · até desligar</div></div></div>",
+      "css": ".ds-band { display: grid; grid-template-columns: 56px 1fr; column-gap: 14px; align-items: center; padding: 18px 18px 20px; width: 380px; box-sizing: border-box; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; } .ds-band-action { background: #FFD200; color: #111111; } .ds-band-picto { width: 56px; height: 56px; display: grid; place-items: center; background: #111111; } .ds-band-text { display: flex; flex-direction: column; gap: 4px; } .ds-band-headline { font-size: 15px; font-weight: 600; } .ds-band-figure { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 40px; font-weight: 700; line-height: 44px; letter-spacing: -0.02em; } .ds-band-figure span { font-size: 24px; font-weight: 600; margin: 0 4px; } .ds-band-detail { font-size: 12px; }"
+    },
+    {
+      "name": "Sign band, calm",
+      "kind": "custom",
+      "refersTo": "band-calm",
+      "description": "Nothing to charge: raised black plate, white type, white pictogram on a rule-grey square.",
+      "html": "<div class=\"ds-band2\"><div class=\"ds-band2-picto\"><svg width=\"28\" height=\"28\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"1.5\"><path d=\"M4 14v-2a8 8 0 0 1 16 0v2\"/><rect x=\"3.5\" y=\"14\" width=\"4\" height=\"6\" rx=\"1\"/><rect x=\"16.5\" y=\"14\" width=\"4\" height=\"6\" rx=\"1\"/></svg></div><div class=\"ds-band2-text\"><div class=\"ds-band2-headline\">Nada para carregar agora</div><div class=\"ds-band2-figure\">21<span>h</span></div><div class=\"ds-band2-detail\">Cloud III Wireless · 64% · até descarregar</div></div></div>",
+      "css": ".ds-band2 { display: grid; grid-template-columns: 56px 1fr; column-gap: 14px; align-items: center; padding: 18px 18px 20px; width: 380px; box-sizing: border-box; background: #1C1C1C; color: #FFFFFF; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; } .ds-band2-picto { width: 56px; height: 56px; display: grid; place-items: center; background: #2A2A2A; } .ds-band2-text { display: flex; flex-direction: column; gap: 4px; } .ds-band2-headline { font-size: 15px; font-weight: 600; } .ds-band2-figure { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 40px; font-weight: 700; line-height: 44px; letter-spacing: -0.02em; } .ds-band2-figure span { font-size: 24px; font-weight: 600; margin-left: 4px; } .ds-band2-detail { font-size: 12px; }"
+    },
+    {
+      "name": "Device row with level tag",
+      "kind": "card",
+      "refersTo": "device-row",
+      "description": "One device: pictogram square, name over kind · state, level right-aligned; the yellow tag only when this device needs charging.",
+      "html": "<div class=\"ds-row\"><div class=\"ds-row-picto\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"1.5\"><path d=\"M4 14v-2a8 8 0 0 1 16 0v2\"/><rect x=\"3.5\" y=\"14\" width=\"4\" height=\"6\" rx=\"1\"/><rect x=\"16.5\" y=\"14\" width=\"4\" height=\"6\" rx=\"1\"/></svg></div><div class=\"ds-row-names\"><div class=\"ds-row-name\">Cloud III Wireless</div><div class=\"ds-row-sub\">Headset · carregar agora</div></div><div class=\"ds-row-right\"><span class=\"ds-level-tag\">14%</span><div class=\"ds-row-time\">2 h 10 min</div></div></div>",
+      "css": ".ds-row { display: grid; grid-template-columns: 36px 1fr auto; column-gap: 12px; align-items: center; padding: 12px 18px; width: 380px; box-sizing: border-box; background: #111111; color: #FFFFFF; border-top: 1px solid #2A2A2A; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; } .ds-row-picto { width: 36px; height: 36px; display: grid; place-items: center; background: #1C1C1C; } .ds-row-names { display: flex; flex-direction: column; gap: 2px; } .ds-row-name { font-size: 14px; font-weight: 600; } .ds-row-sub { font-size: 12px; color: #A8A8A8; } .ds-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; } .ds-level-tag { background: #FFD200; color: #111111; padding: 1px 7px 2px; font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 20px; font-weight: 700; } .ds-row-time { font-size: 11.5px; color: #A8A8A8; }"
+    },
+    {
+      "name": "Device row, calm level",
+      "kind": "card",
+      "refersTo": "device-row",
+      "description": "A device that needs nothing: level in white display type, no tag.",
+      "html": "<div class=\"ds-row2\"><div class=\"ds-row2-picto\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"1.5\"><rect x=\"7\" y=\"3\" width=\"10\" height=\"18\" rx=\"5\"/><path d=\"M12 3v6\"/></svg></div><div><div class=\"ds-row2-name\">PRO X2 SUPERSTRIKE</div><div class=\"ds-row2-sub\">Mouse · Logitech receiver</div></div><div class=\"ds-row2-right\"><div class=\"ds-row2-level\">92%</div><div class=\"ds-row2-time\">3 dias</div></div></div>",
+      "css": ".ds-row2 { display: grid; grid-template-columns: 36px 1fr auto; column-gap: 12px; align-items: center; padding: 12px 18px; width: 380px; box-sizing: border-box; background: #111111; color: #FFFFFF; border-top: 1px solid #2A2A2A; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; } .ds-row2-picto { width: 36px; height: 36px; display: grid; place-items: center; background: #1C1C1C; } .ds-row2-name { font-size: 14px; font-weight: 600; } .ds-row2-sub { font-size: 12px; color: #A8A8A8; margin-top: 2px; } .ds-row2-right { text-align: right; } .ds-row2-level { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 22px; font-weight: 600; } .ds-row2-time { font-size: 11.5px; color: #A8A8A8; margin-top: 2px; }"
+    },
+    {
+      "name": "Footer with icon buttons",
+      "kind": "nav",
+      "refersTo": "footer",
+      "description": "Alert threshold on the left, refresh and settings as borderless pictogram buttons on the right.",
+      "html": "<div class=\"ds-footer\"><span>Alerta em 15%</span><span class=\"ds-footer-actions\"><button class=\"ds-icon-btn\" aria-label=\"Atualizar\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"1.8\"><path d=\"M20 12a8 8 0 1 1-2.3-5.7\"/><path d=\"M20 4v5h-5\"/></svg></button><button class=\"ds-icon-btn\" aria-label=\"Configurações\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"1.8\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><circle cx=\"12\" cy=\"12\" r=\"8\"/></svg></button></span></div>",
+      "css": ".ds-footer { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px 8px 18px; width: 380px; box-sizing: border-box; background: #111111; border-top: 1px solid #2A2A2A; color: #A8A8A8; font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; font-size: 12px; } .ds-footer-actions { display: flex; gap: 2px; } .ds-icon-btn { background: transparent; border: 0; padding: 8px; border-radius: 4px; cursor: pointer; display: grid; place-items: center; } .ds-icon-btn:hover { background: rgba(255,255,255,0.06); } .ds-icon-btn:active { background: rgba(255,255,255,0.04); } .ds-icon-btn:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }"
+    },
+    {
+      "name": "Tray icon",
+      "kind": "chip",
+      "refersTo": "tray-icon-action",
+      "description": "Level of the device that runs out first, drawn into the tray tile; yellow only when it needs charging.",
+      "html": "<span class=\"ds-tray ds-tray-action\">14</span><span class=\"ds-tray ds-tray-calm\">64</span>",
+      "css": ".ds-tray { display: inline-grid; place-items: center; width: 64px; height: 64px; border-radius: 6px; margin-right: 8px; font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-weight: 700; font-size: 34px; } .ds-tray-action { background: #FFD200; color: #111111; } .ds-tray-calm { background: #1C1C1C; color: #FFFFFF; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Airport Sign",
+    "overview": "BatteryLife is wayfinding signage, not a dashboard. The flyout states one next decision (\"Carregue o headset antes de jogar · 2 h 10 min\") on a single plate at the top, and everything below it is a quiet departure board of devices. The world is built from three materials: a black ground, square plates, and one signal yellow that appears only when something has to be charged. When nothing needs charging the whole surface is black and white, and that calm is itself information.\n\nDensity is that of a Windows 11 flyout (Quick Settings): a fixed 380px column, sized to its content, rising from the taskbar. Hierarchy comes from scale and weight rather than color: the time left is set monumental (40px bold) with its units smaller and lighter, so the number reads first, as on a departure board. Pictograms are white on dark squares, one icon family, never colored.\n\nThe surface refuses the category default of a grid of equal battery bars, and refuses the purple-cyan gradient, neon glass and bouncing motion the product brief rules out. Motion is mechanical: the band turns over like a split-flap plate when the decision changes, and the panel rises a short distance like Quick Settings.",
+    "keyCharacteristics": [
+      "One signal color (yellow), present only when an action exists.",
+      "Square plates inside a native rounded Windows frame.",
+      "The figure is the hero: number at full weight, units lighter.",
+      "White pictograms on dark squares, one icon family.",
+      "Sentence-case instructions in pt-BR or English, middle dots (·) as separators.",
+      "Mechanical motion (split-flap), instant under reduced motion."
+    ],
+    "rules": [
+      { "name": "The Act-Now Rule", "body": "In the panel and tray, yellow appears only when a device needs charging, and only in three places: the band, that device's level tag, and the tray icon. If nothing needs charging, no yellow is on screen.", "section": "colors" },
+      { "name": "The One Signal Rule", "body": "Critical does not get a second color. It keeps the yellow band and says \"agora\" / \"now\" in the headline. Urgency escalates in words, not in red.", "section": "colors" },
+      { "name": "The Never Color Alone Rule", "body": "Every yellow state also carries words (\"carregar agora\", \"Carregue o headset\") and a level figure, so the state survives color blindness and contrast themes.", "section": "colors" },
+      { "name": "The Number First Rule", "body": "In any figure, digits are set larger and heavier than their units, so the eye lands on the quantity.", "section": "typography" },
+      { "name": "The Sentence Case Rule", "body": "All copy is sentence case, no all-caps labels, parts joined with a middle dot (\"Mouse · Logitech receiver\"). Instructions are imperative and name the device (\"Carregue o headset agora\").", "section": "typography" },
+      { "name": "The Tonal Plate Rule", "body": "Separation comes from a one-step tone change or a 1px hairline, never from a drop shadow inside the panel.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do reserve sign-yellow for the act-now plate, the needing-charge level tag and the tray icon in the same state.",
+      "Do keep pictograms white on a dark square (ink on yellow, raised or rule on black), from Segoe Fluent Icons only.",
+      "Do set figures with digits at full size and weight and units smaller and lighter (40px/700 against 24px/600).",
+      "Do keep plates square and let only Windows-owned silhouettes (frame, tray tile, app icon) round.",
+      "Do read every color through the theme brushes so contrast themes remap it.",
+      "Do swap instantly when Windows animation effects are off."
+    ],
+    "donts": [
+      "Don't use yellow for hover, selection or decoration, or anywhere in the panel or tray when nothing needs charging (the app icon tile is the one standing exception).",
+      "Don't add a second signal color for critical; escalate the words instead.",
+      "Don't show devices as a grid of equal battery bars or cards.",
+      "Don't add drop shadows inside the panel; separate with tone and 1px hairlines.",
+      "Don't use all-caps labels or uppercase kickers; copy is sentence case.",
+      "Don't use bounce, overshoot or spring easing; motion is mechanical (exponential ease, under 300ms)."
+    ]
+  }
+}
