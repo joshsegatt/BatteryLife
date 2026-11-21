@@ -121,6 +121,7 @@ fn read_battery20(l: &mut dyn Link, idx: u8, d: &mut Device) -> bool {
             if (1..=100).contains(&soc) {
                 d.percent = Some(soc);
             } else if level != 0 {
+                d.coarse = true;
                 d.percent = Some(if level & 8 != 0 {
                     100
                 } else if level & 4 != 0 {
@@ -229,6 +230,7 @@ fn read_battery10(l: &mut dyn Link, idx: u8, d: &mut Device) -> bool {
     {
         const PCT: [u8; 8] = [0, 5, 10, 20, 35, 50, 75, 100];
         d.percent = Some(PCT[p[0].min(7) as usize]);
+        d.coarse = true;
         d.charging = (0x21..=0x26).contains(&p[1]);
         return true;
     }
