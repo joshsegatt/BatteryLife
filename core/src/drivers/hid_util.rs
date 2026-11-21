@@ -24,12 +24,12 @@ pub fn products(infos: &[DeviceInfo]) -> Vec<(u16, u16)> {
 }
 
 /// Collections of one product that match `pred` (e.g. a vendor usage page and report length).
-pub fn find<'a>(
-    infos: &'a [DeviceInfo],
+pub fn find(
+    infos: &[DeviceInfo],
     vid: u16,
     pid: u16,
     pred: impl Fn(&DeviceInfo) -> bool,
-) -> Vec<&'a DeviceInfo> {
+) -> Vec<&DeviceInfo> {
     infos
         .iter()
         .filter(|i| i.vendor_id() == vid && i.product_id() == pid && pred(i))
