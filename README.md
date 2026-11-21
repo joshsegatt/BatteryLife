@@ -15,7 +15,7 @@ BatteryLife sits in the Windows 11 tray and answers one question at a glance: *w
   <img src="docs/images/panel-calm.png" alt="BatteryLife panel (Portuguese UI) when nothing needs charging: a calm black band reads 'Nada para carregar agora' (nothing to charge right now) and shows the next device to run out in 21 hours" width="380">
 </p>
 
-<sub>Screenshots use the app's built-in demo data (`BatteryLife.exe --demo`), not real readings.</sub>
+<sub>Screenshots use the app's built-in demo data (`BatteryLife.exe --demo`), not real readings. The UI follows the Windows display language (English or Portuguese).</sub>
 
 ## Why another battery app
 
