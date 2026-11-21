@@ -11,7 +11,20 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::Device;
+use crate::drivers::{
+    ajazz_ak992, akg, akko, alienware, arbiter, areson, astro, atk_bitmouse, atk_keyboard, audeze,
+    aula, aula_mouse, barracuda_pro, cherry, chimera, coolermaster, dareu, darkrim, darmoshark,
+    endorfy, eweadn, fantech, fractal, hyperx, jabra, jbl, keychron, kysona, logitech_g435_0adf,
+    machenike, maono, mchose, mchose_a5, mchose_g3, mchose_headset, mchose_keyboard, mchose_modern,
+    misc_mice, msi, niceboy, nuphy, nzxt, plantronics, pressplay_icarus, raigor, rapoo, rawm,
+    razer_headset, redragon_evision, rog, rongyuan, royal_kludge, semico, sinowealth_receiver,
+    sonix, sony_inzone, sprime, steelseries_elite, turtlebeach, via_dongle, zenith,
+};
 use crate::drivers::{bluetooth, generic_hid, logitech, phonelink, xbox};
+use crate::drivers::{
+    corsair, endgame, endgame_we, finalmouse, glorious, lamzu, ninjutso, pulsar, razer, scyrox,
+    steelseries, vaxee, vgn, wlmouse, zowie,
+};
 
 /// Devices a driver handles: one vendor, and either listed product ids or (empty) the whole vendor.
 pub struct Match {
@@ -32,14 +45,603 @@ pub struct Source {
     pub poll: fn() -> Vec<Device>,
 }
 
-pub static HID_DRIVERS: &[HidDriver] = &[HidDriver {
-    name: "logitech",
-    matches: &[Match {
-        vid: logitech::VID,
-        pids: &[],
-    }],
-    poll: logitech::poll,
-}];
+pub static HID_DRIVERS: &[HidDriver] = &[
+    HidDriver {
+        name: "logitech",
+        matches: &[Match {
+            vid: logitech::VID,
+            pids: &[],
+        }],
+        poll: logitech::poll,
+    },
+    // Mice, part A. Razer headsets share 1532, so Razer declares OpenRazer's keyboard and mouse ids.
+    HidDriver {
+        name: "razer",
+        matches: &[
+            Match {
+                vid: razer::VID,
+                pids: razer::KEYBOARD_PIDS,
+            },
+            Match {
+                vid: razer::VID,
+                pids: razer::MOUSE_PIDS,
+            },
+        ],
+        poll: razer::poll,
+    },
+    HidDriver {
+        name: "steelseries",
+        matches: &[Match {
+            vid: steelseries::VID,
+            pids: steelseries::PIDS,
+        }],
+        poll: steelseries::poll,
+    },
+    HidDriver {
+        name: "corsair",
+        matches: &[Match {
+            vid: corsair::VID,
+            pids: &[],
+        }],
+        poll: corsair::poll,
+    },
+    HidDriver {
+        name: "glorious",
+        matches: &[
+            Match {
+                vid: glorious::VID_SINOWEALTH,
+                pids: &[],
+            },
+            Match {
+                vid: glorious::VID_HITSCAN,
+                pids: glorious::HITSCAN_PIDS,
+            },
+            Match {
+                vid: glorious::VID_WLMOUSE,
+                pids: glorious::WLMOUSE_YING_PIDS,
+            },
+        ],
+        poll: glorious::poll,
+    },
+    HidDriver {
+        name: "pulsar",
+        matches: &[Match {
+            vid: pulsar::VID,
+            pids: pulsar::PIDS,
+        }],
+        poll: pulsar::poll,
+    },
+    HidDriver {
+        name: "lamzu",
+        matches: &[
+            Match {
+                vid: lamzu::VID_ARBITER_SHARED,
+                pids: lamzu::PIDS_373E,
+            },
+            Match {
+                vid: lamzu::VID,
+                pids: &[],
+            },
+        ],
+        poll: lamzu::poll,
+    },
+    HidDriver {
+        name: "vgn",
+        matches: &[Match {
+            vid: vgn::VID,
+            pids: &[vgn::PID_ZHOU_WIRELESS],
+        }],
+        poll: vgn::poll,
+    },
+    HidDriver {
+        name: "finalmouse",
+        matches: &[Match {
+            vid: finalmouse::VID,
+            pids: finalmouse::PIDS,
+        }],
+        poll: finalmouse::poll,
+    },
+    HidDriver {
+        name: "wlmouse",
+        matches: &[Match {
+            vid: wlmouse::VID,
+            pids: wlmouse::PIDS,
+        }],
+        poll: wlmouse::poll,
+    },
+    HidDriver {
+        name: "vaxee",
+        matches: &[Match {
+            vid: vaxee::VID,
+            pids: vaxee::PIDS,
+        }],
+        poll: vaxee::poll,
+    },
+    HidDriver {
+        name: "ninjutso",
+        matches: &[
+            Match {
+                vid: ninjutso::VID_NORDIC,
+                pids: ninjutso::SORA_PIDS,
+            },
+            Match {
+                vid: ninjutso::VID_PIXART,
+                pids: ninjutso::TEN_PIDS,
+            },
+        ],
+        poll: ninjutso::poll,
+    },
+    HidDriver {
+        name: "scyrox",
+        matches: &[Match {
+            vid: scyrox::VID,
+            pids: &[scyrox::PID_V12M_RECEIVER],
+        }],
+        poll: scyrox::poll,
+    },
+    HidDriver {
+        name: "endgame",
+        matches: &[Match {
+            vid: endgame::VID,
+            pids: &[endgame::PID_DONGLE_4K],
+        }],
+        poll: endgame::poll,
+    },
+    HidDriver {
+        name: "endgame-we",
+        matches: &[Match {
+            vid: endgame_we::VID,
+            pids: &[endgame_we::PID],
+        }],
+        poll: endgame_we::poll,
+    },
+    HidDriver {
+        name: "zowie",
+        matches: &[Match {
+            vid: zowie::VID,
+            pids: &[],
+        }],
+        poll: zowie::poll,
+    },
+    // Keyboard batch ported from BatteryHub (and the mice those files also cover).
+    HidDriver {
+        name: "aula",
+        matches: aula::MATCHES,
+        poll: aula::poll,
+    },
+    HidDriver {
+        name: "dareu",
+        matches: &[Match {
+            vid: dareu::VID,
+            pids: dareu::PIDS,
+        }],
+        poll: dareu::poll,
+    },
+    HidDriver {
+        name: "atk_keyboard",
+        matches: atk_keyboard::MATCHES,
+        poll: atk_keyboard::poll,
+    },
+    HidDriver {
+        name: "redragon_evision",
+        matches: &[Match {
+            vid: redragon_evision::VID,
+            pids: redragon_evision::PIDS,
+        }],
+        poll: redragon_evision::poll,
+    },
+    HidDriver {
+        name: "keychron",
+        matches: &[Match {
+            vid: keychron::VID,
+            pids: &[],
+        }],
+        poll: keychron::poll,
+    },
+    HidDriver {
+        name: "cherry",
+        matches: &[Match {
+            vid: cherry::VID,
+            pids: cherry::PIDS,
+        }],
+        poll: cherry::poll,
+    },
+    HidDriver {
+        name: "nuphy",
+        matches: &[Match {
+            vid: nuphy::VID,
+            pids: nuphy::PIDS,
+        }],
+        poll: nuphy::poll,
+    },
+    HidDriver {
+        name: "akko",
+        matches: &[Match {
+            vid: akko::VID,
+            pids: akko::PIDS,
+        }],
+        poll: akko::poll,
+    },
+    HidDriver {
+        name: "rongyuan",
+        matches: rongyuan::MATCHES,
+        poll: rongyuan::poll,
+    },
+    HidDriver {
+        name: "sonix",
+        matches: sonix::MATCHES,
+        poll: sonix::poll,
+    },
+    HidDriver {
+        name: "via_dongle",
+        matches: &[Match {
+            vid: via_dongle::VID,
+            pids: via_dongle::PIDS,
+        }],
+        poll: via_dongle::poll,
+    },
+    HidDriver {
+        name: "semico",
+        matches: &[Match {
+            vid: semico::VID,
+            pids: semico::PIDS,
+        }],
+        poll: semico::poll,
+    },
+    HidDriver {
+        name: "ajazz_ak992",
+        matches: &[Match {
+            vid: ajazz_ak992::VID,
+            pids: ajazz_ak992::PIDS,
+        }],
+        poll: ajazz_ak992::poll,
+    },
+    HidDriver {
+        name: "royal_kludge",
+        matches: &[Match {
+            vid: royal_kludge::VID,
+            pids: royal_kludge::PIDS,
+        }],
+        poll: royal_kludge::poll,
+    },
+    HidDriver {
+        name: "machenike",
+        matches: &[Match {
+            vid: machenike::VID,
+            pids: machenike::PIDS,
+        }],
+        poll: machenike::poll,
+    },
+    HidDriver {
+        name: "niceboy",
+        matches: &[Match {
+            vid: niceboy::VID,
+            pids: niceboy::PIDS,
+        }],
+        poll: niceboy::poll,
+    },
+    HidDriver {
+        name: "mchose_keyboard",
+        matches: &[Match {
+            vid: mchose_keyboard::VID,
+            pids: mchose_keyboard::PIDS,
+        }],
+        poll: mchose_keyboard::poll,
+    },
+    HidDriver {
+        name: "darkrim",
+        matches: &[Match {
+            vid: darkrim::VID,
+            pids: darkrim::PIDS,
+        }],
+        poll: darkrim::poll,
+    },
+    // Headsets (and a few mice that live in the same BatteryHub files), exact product ids except
+    // Jabra, whose driver asks every Jabra product.
+    HidDriver {
+        name: "hyperx",
+        matches: &[
+            Match {
+                vid: hyperx::VID_HP,
+                pids: hyperx::HP_PIDS,
+            },
+            Match {
+                vid: hyperx::VID_KINGSTON,
+                pids: hyperx::KINGSTON_PIDS,
+            },
+        ],
+        poll: hyperx::poll,
+    },
+    HidDriver {
+        name: "steelseries-elite",
+        matches: &[Match {
+            vid: steelseries_elite::VID,
+            pids: &[steelseries_elite::PID],
+        }],
+        poll: steelseries_elite::poll,
+    },
+    HidDriver {
+        name: "razer-headset",
+        matches: &[Match {
+            vid: razer_headset::VID,
+            pids: razer_headset::PIDS,
+        }],
+        poll: razer_headset::poll,
+    },
+    HidDriver {
+        name: "barracuda-pro",
+        matches: &[Match {
+            vid: barracuda_pro::VID,
+            pids: &[barracuda_pro::PID],
+        }],
+        poll: barracuda_pro::poll,
+    },
+    HidDriver {
+        name: "astro",
+        matches: &[
+            Match {
+                vid: astro::VID_LOGITECH,
+                pids: astro::LOGITECH_PIDS,
+            },
+            Match {
+                vid: astro::VID_ASTRO,
+                pids: astro::ASTRO_PIDS,
+            },
+        ],
+        poll: astro::poll,
+    },
+    HidDriver {
+        name: "audeze",
+        matches: &[Match {
+            vid: audeze::VID,
+            pids: audeze::PIDS,
+        }],
+        poll: audeze::poll,
+    },
+    HidDriver {
+        name: "jabra",
+        matches: &[Match {
+            vid: jabra::VID,
+            pids: &[],
+        }],
+        poll: jabra::poll,
+    },
+    HidDriver {
+        name: "jbl",
+        matches: &[Match {
+            vid: jbl::VID,
+            pids: jbl::PIDS,
+        }],
+        poll: jbl::poll,
+    },
+    HidDriver {
+        name: "plantronics",
+        matches: &[Match {
+            vid: plantronics::VID,
+            pids: plantronics::PIDS,
+        }],
+        poll: plantronics::poll,
+    },
+    HidDriver {
+        name: "turtlebeach",
+        matches: &[Match {
+            vid: turtlebeach::VID,
+            pids: turtlebeach::PIDS,
+        }],
+        poll: turtlebeach::poll,
+    },
+    HidDriver {
+        name: "akg",
+        matches: &[Match {
+            vid: akg::VID,
+            pids: &[akg::PID],
+        }],
+        poll: akg::poll,
+    },
+    HidDriver {
+        name: "nzxt",
+        matches: &[Match {
+            vid: nzxt::VID,
+            pids: &[nzxt::RECEIVER, nzxt::CABLE],
+        }],
+        poll: nzxt::poll,
+    },
+    HidDriver {
+        name: "sony-inzone",
+        matches: &[Match {
+            vid: sony_inzone::VID,
+            pids: sony_inzone::PIDS,
+        }],
+        poll: sony_inzone::poll,
+    },
+    HidDriver {
+        name: "fractal",
+        matches: &[Match {
+            vid: fractal::VID,
+            pids: fractal::PIDS,
+        }],
+        poll: fractal::poll,
+    },
+    HidDriver {
+        name: "mchose-headset",
+        matches: &[Match {
+            vid: mchose_headset::VID,
+            pids: &[mchose_headset::PID],
+        }],
+        poll: mchose_headset::poll,
+    },
+    HidDriver {
+        name: "logitech-g435-0adf",
+        matches: &[Match {
+            vid: logitech_g435_0adf::VID,
+            pids: &[logitech_g435_0adf::PID],
+        }],
+        poll: logitech_g435_0adf::poll,
+    },
+    HidDriver {
+        name: "endorfy",
+        matches: &[Match {
+            vid: endorfy::VID,
+            pids: &[endorfy::PID],
+        }],
+        poll: endorfy::poll,
+    },
+    HidDriver {
+        name: "maono",
+        matches: &[Match {
+            vid: maono::VID,
+            pids: &[maono::PID],
+        }],
+        poll: maono::poll,
+    },
+    HidDriver {
+        name: "alienware",
+        matches: &[Match {
+            vid: alienware::VID,
+            pids: &[alienware::PID],
+        }],
+        poll: alienware::poll,
+    },
+    HidDriver {
+        name: "pressplay-icarus",
+        matches: &[Match {
+            vid: pressplay_icarus::VID,
+            pids: &[pressplay_icarus::PID],
+        }],
+        poll: pressplay_icarus::poll,
+    },
+    // Wireless mice, part B (BatteryHub ports).
+    HidDriver {
+        name: "rawm",
+        matches: rawm::MATCHES,
+        poll: rawm::poll,
+    },
+    HidDriver {
+        name: "sprime",
+        matches: sprime::MATCHES,
+        poll: sprime::poll,
+    },
+    HidDriver {
+        name: "darmoshark",
+        matches: darmoshark::MATCHES,
+        poll: darmoshark::poll,
+    },
+    HidDriver {
+        name: "kysona",
+        matches: kysona::MATCHES,
+        poll: kysona::poll,
+    },
+    HidDriver {
+        name: "chimera",
+        matches: chimera::MATCHES,
+        poll: chimera::poll,
+    },
+    HidDriver {
+        name: "arbiter",
+        matches: arbiter::MATCHES,
+        poll: arbiter::poll,
+    },
+    HidDriver {
+        name: "atk-bitmouse",
+        matches: atk_bitmouse::MATCHES,
+        poll: atk_bitmouse::poll,
+    },
+    HidDriver {
+        name: "eweadn",
+        matches: eweadn::MATCHES,
+        poll: eweadn::poll,
+    },
+    HidDriver {
+        name: "zenith",
+        matches: zenith::MATCHES,
+        poll: zenith::poll,
+    },
+    HidDriver {
+        name: "misc-motospeed",
+        matches: misc_mice::MOTOSPEED,
+        poll: misc_mice::poll_motospeed,
+    },
+    HidDriver {
+        name: "misc-xenta",
+        matches: misc_mice::XENTA,
+        poll: misc_mice::poll_xenta,
+    },
+    HidDriver {
+        name: "misc-ajazz",
+        matches: misc_mice::AJAZZ,
+        poll: misc_mice::poll_ajazz,
+    },
+    HidDriver {
+        name: "misc-pixart",
+        matches: misc_mice::PIXART,
+        poll: misc_mice::poll_pixart,
+    },
+    HidDriver {
+        name: "fantech",
+        matches: fantech::MATCHES,
+        poll: fantech::poll,
+    },
+    HidDriver {
+        name: "raigor",
+        matches: raigor::MATCHES,
+        poll: raigor::poll,
+    },
+    HidDriver {
+        name: "rapoo",
+        matches: rapoo::MATCHES,
+        poll: rapoo::poll,
+    },
+    HidDriver {
+        name: "areson",
+        matches: areson::MATCHES,
+        poll: areson::poll,
+    },
+    HidDriver {
+        name: "coolermaster",
+        matches: coolermaster::MATCHES,
+        poll: coolermaster::poll,
+    },
+    HidDriver {
+        name: "msi",
+        matches: msi::MATCHES,
+        poll: msi::poll,
+    },
+    HidDriver {
+        name: "rog",
+        matches: rog::MATCHES,
+        poll: rog::poll,
+    },
+    HidDriver {
+        name: "mchose",
+        matches: mchose::MATCHES,
+        poll: mchose::poll,
+    },
+    HidDriver {
+        name: "mchose-a5",
+        matches: mchose_a5::MATCHES,
+        poll: mchose_a5::poll,
+    },
+    HidDriver {
+        name: "mchose-g3",
+        matches: mchose_g3::MATCHES,
+        poll: mchose_g3::poll,
+    },
+    HidDriver {
+        name: "mchose-modern",
+        matches: mchose_modern::MATCHES,
+        poll: mchose_modern::poll,
+    },
+    HidDriver {
+        name: "sinowealth-receiver",
+        matches: sinowealth_receiver::MATCHES,
+        poll: sinowealth_receiver::poll,
+    },
+    HidDriver {
+        name: "aula-mouse",
+        matches: aula_mouse::MATCHES,
+        poll: aula_mouse::poll,
+    },
+];
 
 /// Gets every HID collection that no vendor driver matched.
 pub static FALLBACK: &HidDriver = &HidDriver {
@@ -101,7 +703,8 @@ pub fn poll(
     sources: &'static [Source],
     timeout: Duration,
 ) -> Vec<Device> {
-    // Index drivers.len() is the fallback, which gets everything no vendor driver matched.
+    // Index drivers.len() is the fallback, which gets everything no vendor driver matched (and,
+    // after the vendor drivers ran, the products they did not recognise).
     let mut assigned: Vec<Vec<DeviceInfo>> = vec![Vec::new(); drivers.len() + 1];
     for info in api.device_list() {
         let i = pick(drivers, info.vendor_id(), info.product_id()).unwrap_or(drivers.len());
@@ -110,11 +713,12 @@ pub fn poll(
 
     let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
     let mut jobs: Vec<(usize, &'static str)> = Vec::new();
-    for (i, infos) in assigned.iter().enumerate() {
+    // Vendor drivers run in parallel now; the fallback runs after them (below), because it also
+    // gets the products of vendor drivers that did not recognise them.
+    for (i, (driver, infos)) in drivers.iter().zip(&assigned).enumerate() {
         if infos.is_empty() {
             continue;
         }
-        let driver = drivers.get(i).unwrap_or(fallback);
         let (tx, api, infos) = (tx.clone(), api.clone(), infos.clone());
         if spawn(driver.name, move || {
             let _ = tx.send((i, (driver.poll)(&api, &infos)));
@@ -149,6 +753,19 @@ pub fn poll(
             eprintln!("driver {name} missed the {} s deadline", timeout.as_secs());
         }
     }
+    // A product counts as claimed only once its driver reports something (BatteryHub's rule): the
+    // products of a vendor driver that answered with no device also go to the generic fallback,
+    // so an unknown model of a whole-vendor match can still be read through standard HID.
+    // A driver that missed the deadline is still running on its handles and is left alone.
+    let mut fallback_infos = assigned[drivers.len()].clone();
+    for (i, devices) in &results {
+        if *i < drivers.len() && devices.is_empty() {
+            fallback_infos.extend(assigned[*i].iter().cloned());
+        }
+    }
+    if !fallback_infos.is_empty() {
+        results.push((drivers.len(), (fallback.poll)(&api, &fallback_infos)));
+    }
     results.sort_by_key(|(i, _)| *i);
 
     // Physical devices (Windows container ids) a HID driver reported, so the same device seen
@@ -172,7 +789,7 @@ pub fn poll(
     let vendor = containers(&|i| i < drivers.len());
     // The generic HID reading of a Bluetooth device loses to Windows' own level for it.
     let generic: Vec<(String, String)> = if has_bt {
-        assigned[drivers.len()]
+        fallback_infos
             .iter()
             .filter_map(|info| {
                 let c = bluetooth::container_of(info.path())?;
@@ -384,6 +1001,15 @@ mod tests {
     }
 
     #[test]
+    fn headset_dongles_beat_the_logitech_vendor_match() {
+        let name = |vid, pid| pick(HID_DRIVERS, vid, pid).map(|i| HID_DRIVERS[i].name);
+        assert_eq!(name(0x046D, 0x0ADF), Some("logitech-g435-0adf"));
+        assert_eq!(name(0x046D, 0x0B0B), Some("astro"));
+        assert_eq!(name(0x046D, 0xC54D), Some("logitech"));
+        assert_eq!(name(0x0B0E, 0x2E51), Some("jabra"));
+    }
+
+    #[test]
     fn registry_has_no_duplicate_exact_claims() {
         let mut seen = Vec::new();
         for d in HID_DRIVERS {
@@ -396,6 +1022,24 @@ mod tests {
                     );
                     seen.push((m.vid, *p));
                 }
+            }
+        }
+    }
+
+    /// Two whole-vendor drivers on one vid would leave the winner to registry order, the fragile
+    /// ordering this design exists to avoid.
+    #[test]
+    fn registry_has_no_duplicate_whole_vendor_claims() {
+        let mut seen = Vec::new();
+        for d in HID_DRIVERS {
+            for m in d.matches.iter().filter(|m| m.pids.is_empty()) {
+                assert!(
+                    !seen.contains(&m.vid),
+                    "{:04X} claimed whole by two drivers ({})",
+                    m.vid,
+                    d.name
+                );
+                seen.push(m.vid);
             }
         }
     }

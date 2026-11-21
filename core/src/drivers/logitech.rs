@@ -3,12 +3,14 @@
 //! Message: [report][device index][feature index][function << 4 | sw id][params...]
 //!   report 0x10 = short (7 bytes), 0x11 = long (20 bytes)
 //!   HID++ 2.0 error: [.., 0xFF, feature, fn|sw, code]   HID++ 1.0 error: [.., 0x8F, sub id, address, code]
-//! Battery features: 0x1004 unified battery, 0x1000 battery level, 0x1001 battery voltage.
+//! Battery features: 0x1004 unified battery, 0x1000 battery level, 0x1001 battery voltage,
+//! 0x1F20 ADC measurement (G headsets, per-model voltage tables).
 //! HID++ 1.0 devices: registers 0x0D and 0x07. Only read-only queries are ever sent.
 //!
 //! Ported from BatteryHub (src/drivers/logitech.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits the Logitech
-//! HID++ 2.0 drafts, Solaar and HeadsetControl. Headset voltage tables are not ported yet.
+//! HID++ 2.0 drafts, Solaar and HeadsetControl (headset voltage calibration); PRO X Wireless: G HUB's
+//! power model for 046D:0ABA.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -17,6 +19,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 
 use crate::device::{Device, Kind, guess_kind, interpolate};
+use crate::drivers::hid_util::physical_key;
 
 pub const VID: u16 = 0x046D;
 /// Our software id; replies to other apps (G HUB, Options+) carry theirs and are ignored.
@@ -102,6 +105,32 @@ fn li_ion_percent(mv: i32) -> u8 {
     interpolate(mv, &V, &P)
 }
 
+/// Voltage -> % for G headsets, per model (BatteryHub's `HeadsetPercent`).
+pub fn headset_percent(pid: u16, mv: i32) -> u8 {
+    const STEPS6: [i32; 6] = [100, 50, 30, 20, 5, 0];
+    const G533: [i32; 6] = [4200, 3850, 3790, 3750, 3680, 3330];
+    const G535: [i32; 6] = [4175, 3817, 3766, 3730, 3664, 3310];
+    const G633: [i32; 8] = [4100, 3950, 3850, 3750, 3650, 3500, 3300, 3150];
+    const G633_P: [i32; 8] = [100, 80, 60, 40, 20, 10, 5, 0];
+    const GPRO: [i32; 6] = [4150, 3830, 3780, 3740, 3670, 3320];
+    const PROX: [i32; 21] = [
+        4102, 4046, 3993, 3950, 3915, 3877, 3838, 3809, 3789, 3772, 3758, 3747, 3736, 3722, 3707,
+        3687, 3661, 3644, 3548, 3426, 3293,
+    ];
+    const PROX_P: [i32; 21] = [
+        100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5, 0,
+    ];
+    const DEFAULT: [i32; 6] = [4100, 3850, 3780, 3730, 3650, 3300];
+    match pid {
+        0x0A66 => interpolate(mv, &G533, &STEPS6),
+        0x0AC4 => interpolate(mv, &G535, &STEPS6),
+        0x0A5C | 0x0A89 | 0x0A5B | 0x0A87 | 0x0AB5 | 0x0AFE => interpolate(mv, &G633, &G633_P),
+        0x0AAA | 0x0ABA => interpolate(mv, &PROX, &PROX_P),
+        0x0AA7 | 0x0AFB => interpolate(mv, &GPRO, &STEPS6),
+        _ => interpolate(mv, &DEFAULT, &STEPS6),
+    }
+}
+
 fn kind_from_type(t: u8) -> Kind {
     match t {
         0x00 | 0x02 => Kind::Keyboard,
@@ -113,7 +142,7 @@ fn kind_from_type(t: u8) -> Kind {
 }
 
 /// Fills the battery fields from whichever battery feature the device has. False if none.
-fn read_battery20(l: &mut dyn Link, idx: u8, d: &mut Device) -> bool {
+fn read_battery20(l: &mut dyn Link, idx: u8, pid: u16, d: &mut Device) -> bool {
     if let Some(f) = feature_index(l, idx, 0x1004) {
         // UNIFIED_BATTERY get_status: [state of charge %][level flags][charging status]
         if let Some(p) = call(l, idx, f, 1, &[]).filter(|p| p.len() >= 3) {
@@ -159,6 +188,18 @@ fn read_battery20(l: &mut dyn Link, idx: u8, d: &mut Device) -> bool {
             if mv != 0 {
                 d.millivolts = Some(mv);
                 d.percent = Some(li_ion_percent(mv as i32));
+            }
+            return true;
+        }
+    }
+    if let Some(f) = feature_index(l, idx, 0x1F20) {
+        // ADC_MEASUREMENT (headsets): [mV hi][mV lo][status], status 03 = charging
+        if let Some(p) = call(l, idx, f, 0, &[]).filter(|p| p.len() >= 3) {
+            let mv = u16::from_be_bytes([p[0], p[1]]);
+            d.charging = p[2] == 0x03;
+            if mv != 0 {
+                d.millivolts = Some(mv);
+                d.percent = Some(headset_percent(pid, i32::from(mv)));
             }
             return true;
         }
@@ -271,7 +312,7 @@ pub fn poll_link(
         let found = match ping {
             Reply::Ok(p) if p.len() >= 3 && p[0] >= 2 => {
                 read_name_and_type20(l, idx, &mut d);
-                let ok = read_battery20(l, idx, &mut d);
+                let ok = read_battery20(l, idx, pid, &mut d);
                 if ok {
                     let unit = read_unit_id20(l, idx);
                     d.key = stable_key(&d.key, unit);
@@ -409,21 +450,6 @@ impl HidLink {
         }
         None
     }
-}
-
-/// Groups HID collections of one physical interface: drops "&colNN" and the last "&NNNN" of the path.
-fn physical_key(path: &str) -> String {
-    let p = path.to_lowercase();
-    let parts: Vec<&str> = p.splitn(4, '#').collect();
-    if parts.len() < 4 {
-        return String::new();
-    }
-    let hw = match parts[1].find("&col") {
-        Some(i) => format!("{}{}", &parts[1][..i], parts[1].get(i + 6..).unwrap_or("")),
-        None => parts[1].to_string(),
-    };
-    let inst = parts[2].rsplit_once('&').map_or(parts[2], |(a, _)| a);
-    format!("{hw}#{inst}")
 }
 
 /// Polls the Logitech HID collections the dispatcher assigned to this driver.
@@ -615,6 +641,34 @@ mod tests {
     }
 
     #[test]
+    fn headset_adc_measurement_uses_the_model_table() {
+        let mut m = HashMap::new();
+        m.insert(
+            (0xFF, 0x00, 0x10 | SW_ID, 0x00),
+            Reply::Ok(vec![4, 2, 0x5A]),
+        );
+        m.insert((0xFF, 0x00, f(0), 0x20), Reply::Ok(vec![0x07])); // ADC_MEASUREMENT (1F20)
+        m.insert((0xFF, 0x07, f(0), 0), Reply::Ok(vec![0x0F, 0x0A, 0x03])); // 3850 mV, charging
+        let d = &poll_link(&mut Fake(m), 0x0A66, "G533", true, "")[0];
+        assert_eq!(
+            (d.millivolts, d.percent, d.charging),
+            (Some(3850), Some(50), true)
+        );
+    }
+
+    #[test]
+    fn headset_voltage_tables() {
+        assert_eq!(headset_percent(0x0A66, 3850), 50); // G533 knot
+        assert_eq!(headset_percent(0x0AC4, 3817), 50); // G535 knot
+        assert_eq!(headset_percent(0x0A5C, 3950), 80); // G633
+        assert_eq!(headset_percent(0x0ABA, 3758), 50); // PRO X Wireless
+        assert_eq!(headset_percent(0x0AA7, 3780), 30); // PRO
+        assert_eq!(headset_percent(0x0000, 3780), 30); // default
+        assert_eq!(headset_percent(0x0A66, 4300), 100);
+        assert_eq!(headset_percent(0x0A66, 3000), 0);
+    }
+
+    #[test]
     fn hidpp10_register_battery() {
         let mut m = HashMap::new();
         m.insert((2, 0x00, 0x10 | SW_ID, 0x00), Reply::Err(0x01));
@@ -638,13 +692,5 @@ mod tests {
     #[test]
     fn empty_receiver_reports_nothing() {
         assert!(poll_link(&mut Fake(HashMap::new()), 0xC54D, "", false, "").is_empty());
-    }
-
-    #[test]
-    fn physical_key_merges_collections() {
-        let a = r"\\?\HID#VID_046D&PID_C54D&MI_02&Col01#7&a2e4456&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        let b = r"\\?\HID#VID_046D&PID_C54D&MI_02&Col02#7&a2e4456&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        assert_eq!(physical_key(a), physical_key(b));
-        assert_eq!(physical_key(a), "vid_046d&pid_c54d&mi_02#7&a2e4456&0");
     }
 }
