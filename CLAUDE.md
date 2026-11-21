@@ -11,7 +11,7 @@ Battery hub for wireless devices on Windows 11. GPL-3.0. Read-only: never write 
 - `cd core && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`
 - `cd app && dotnet test BatteryLife.Logic.Tests && dotnet build BatteryLife.App -c Release -r win-x64 -p:Platform=x64 -warnaserror`
 - Run the app against real devices: `cargo build --release` in `core/`, then build the app (it copies `batterylife-core.exe`). `BatteryLife.exe --demo [--calm] --open` shows synthetic data.
-- Release: pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which publishes a portable zip with .NET inside. Use `dotnet build -p:SelfContained=true`, not `dotnet publish`: publish drops the `.xbf` and `.pri` files and the exe crashes on start.
+- Release: pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which publishes the installer (`installer/BatteryLife.iss`, Inno Setup, per-user) and a portable zip, both with .NET inside. Use `dotnet build -p:SelfContained=true`, not `dotnet publish`: publish drops the `.xbf` and `.pri` files and the exe crashes on start.
 
 ## Conventions
 - Drivers ported from BatteryHub keep a header naming the source file and commit, and are listed in `CREDITS.md`.
