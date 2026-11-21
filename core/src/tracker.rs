@@ -12,10 +12,12 @@ use crate::device::Device;
 pub struct Tracker {
     /// Last reading with a level, and when it was taken.
     last: HashMap<String, (Device, Instant)>,
+    /// Keys in the order they were first seen, so a device keeps its row when it sleeps or wakes.
+    order: Vec<String>,
 }
 
 impl Tracker {
-    /// Merges a fresh poll with remembered readings. Fresh devices come first, in poll order.
+    /// Merges a fresh poll with remembered readings, in the order devices were first seen.
     pub fn update(&mut self, fresh: Vec<Device>, now: Instant) -> Vec<Device> {
         let mut out = Vec::with_capacity(fresh.len());
         for mut d in fresh {
@@ -46,6 +48,16 @@ impl Tracker {
             out.push(d);
             true
         });
+        for d in &out {
+            if !self.order.contains(&d.key) {
+                self.order.push(d.key.clone());
+            }
+        }
+        // Forget keys that are neither shown nor remembered, so the list cannot grow without bound.
+        self.order
+            .retain(|k| out.iter().any(|d| d.key == *k) || self.last.contains_key(k));
+        let pos = |k: &str| self.order.iter().position(|o| o == k).unwrap_or(usize::MAX);
+        out.sort_by_key(|d| pos(&d.key));
         out
     }
 }
@@ -100,6 +112,19 @@ mod tests {
         let out = t.update(vec![mouse(Some(54))], t0 + Duration::from_secs(60));
         assert_eq!((out[0].percent, out[0].asleep), (Some(54), false));
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn sleeping_device_keeps_its_row() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        let mut phone = Device::new("p", "Phone", Kind::Phone, "Phone Link");
+        phone.percent = Some(40);
+        t.update(vec![mouse(Some(80)), phone.clone()], t0);
+        let out = t.update(vec![phone], t0 + Duration::from_secs(60));
+        let keys: Vec<&str> = out.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["m", "p"]);
+        assert!(out[0].asleep);
     }
 
     #[test]

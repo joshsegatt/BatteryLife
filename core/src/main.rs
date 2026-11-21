@@ -4,6 +4,10 @@
 //!   batterylife-core --json           print every device once, as a JSON array
 //!   batterylife-core --watch [secs]   keep polling (default every 60 s), one JSON array per line;
 //!                                     a "refresh" line on stdin polls now, closing stdin exits
+//!
+//! --watch is meant to run under a parent that keeps a pipe on its stdin (the app redirects stdin):
+//! end of input means the parent is gone, so it stops instead of polling forever as an orphan.
+//! Started with stdin at end of file (e.g. `< NUL`) it polls once and exits.
 
 use std::io::{BufRead, Write};
 use std::sync::mpsc;
@@ -69,6 +73,14 @@ fn watch(interval: Duration) {
             .is_err()
         {
             return; // nobody is reading anymore
+        }
+        // Refreshes asked for while that poll ran are already answered by it.
+        loop {
+            match rx.try_recv() {
+                Ok(Command::Refresh) => {}
+                Ok(Command::Quit) | Err(mpsc::TryRecvError::Disconnected) => return,
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
         }
         match rx.recv_timeout(interval) {
             Ok(Command::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {}

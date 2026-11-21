@@ -10,6 +10,8 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits the Logitech
 //! HID++ 2.0 drafts, Solaar and HeadsetControl. Headset voltage tables are not ported yet.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hidapi::{DeviceInfo, HidApi, HidDevice};
@@ -268,8 +270,9 @@ pub fn poll_link(
             Reply::Ok(p) if p.len() >= 3 && p[0] >= 2 => {
                 read_name_and_type20(l, idx, &mut d);
                 let ok = read_battery20(l, idx, &mut d);
-                if ok && let Some(unit) = read_unit_id20(l, idx) {
-                    d.key = format!("logi:unit:{unit}");
+                if ok {
+                    let unit = read_unit_id20(l, idx);
+                    d.key = stable_key(&d.key, unit);
                 }
                 ok
             }
@@ -284,6 +287,26 @@ pub fn poll_link(
         }
     }
     out
+}
+
+/// Unit-id key for a receiver slot, remembered so one failed unit-id read does not change the key
+/// (the tracker would then show the old key as a second, sleeping copy of the same device).
+static UNIT_KEYS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+fn stable_key(slot_key: &str, unit: Option<String>) -> String {
+    let mut guard = UNIT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    match unit {
+        Some(u) => {
+            let key = format!("logi:unit:{u}");
+            map.insert(slot_key.to_string(), key.clone());
+            key
+        }
+        None => map
+            .get(slot_key)
+            .cloned()
+            .unwrap_or_else(|| slot_key.to_string()),
+    }
 }
 
 fn guess_kind(name: &str) -> Kind {
@@ -303,7 +326,13 @@ fn guess_kind(name: &str) -> Kind {
 struct HidLink {
     short: Option<HidDevice>,
     long: Option<HidDevice>,
+    /// After this, requests return NoAnswer at once, so a stalled device cannot push the whole driver
+    /// past the registry's deadline and take the devices already read down with it.
+    deadline: Instant,
 }
+
+/// Total time this driver spends per poll; stays under registry::DRIVER_TIMEOUT (5 s).
+const POLL_BUDGET: Duration = Duration::from_secs(4);
 
 impl Link for HidLink {
     fn request(
@@ -315,6 +344,9 @@ impl Link for HidLink {
         force_short: bool,
         timeout: Duration,
     ) -> Reply {
+        if Instant::now() >= self.deadline {
+            return Reply::NoAnswer;
+        }
         let use_long = self.long.is_some() && !force_short;
         let (len, report) = if use_long { (20, 0x11) } else { (7, 0x10) };
         let Some(dev) = (if use_long { &self.long } else { &self.short }) else {
@@ -328,7 +360,7 @@ impl Link for HidLink {
         if dev.write(&msg).is_err() {
             return Reply::NoAnswer;
         }
-        let end = Instant::now() + timeout;
+        let end = (Instant::now() + timeout).min(self.deadline);
         while Instant::now() < end {
             if let Some(r) = self.read_any().and_then(|r| match_reply(&r, idx, b2, b3)) {
                 return r;
@@ -355,7 +387,7 @@ impl Link for HidLink {
                 pending.push(idx);
             }
         }
-        let end = Instant::now() + timeout;
+        let end = (Instant::now() + timeout).min(self.deadline);
         while !pending.is_empty() && Instant::now() < end {
             let Some(r) = self.read_any() else { continue };
             let Some(pos) = pending
@@ -449,12 +481,14 @@ pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
         }
     }
 
+    let deadline = Instant::now() + POLL_BUDGET;
     let mut out = Vec::new();
     let mut seen_pid: Vec<u16> = Vec::new();
     for (_, g) in groups {
         let mut link = HidLink {
             short: g.short.as_ref().and_then(|p| api.open_path(p).ok()),
             long: g.long.as_ref().and_then(|p| api.open_path(p).ok()),
+            deadline,
         };
         if link.short.is_none() && link.long.is_none() {
             continue;
@@ -599,6 +633,17 @@ mod tests {
         let devices = poll_link(&mut Fake(m), 0xC52B, "", false, "");
         assert_eq!(devices.len(), 1);
         assert_eq!((devices[0].percent, devices[0].charging), (Some(55), true));
+    }
+
+    #[test]
+    fn key_stays_stable_when_unit_id_read_fails_once() {
+        // A pid no other test uses: the unit-key cache is process-wide.
+        let mut fake = superlight_on_receiver();
+        let first = poll_link(&mut fake, 0xBEEF, "", false, "")[0].key.clone();
+        fake.0.remove(&(1, 0x02, f(0), 0)); // unit id read now times out
+        let second = poll_link(&mut fake, 0xBEEF, "", false, "")[0].key.clone();
+        assert_eq!(first, "logi:unit:ABCD1234");
+        assert_eq!(second, first);
     }
 
     #[test]

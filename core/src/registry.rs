@@ -5,7 +5,7 @@
 //! hand-kept ordering. Drivers then run in parallel, each with a deadline, so one slow or stuck
 //! device cannot hold up the others.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use hidapi::{DeviceInfo, HidApi};
@@ -91,47 +91,87 @@ pub fn poll(
     }
 
     let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
-    let mut jobs = 0;
+    let mut jobs: Vec<(usize, &'static str)> = Vec::new();
     for (i, (driver, infos)) in drivers.iter().zip(assigned).enumerate() {
         if infos.is_empty() {
             continue;
         }
         let (tx, api) = (tx.clone(), api.clone());
-        spawn(driver.name, move || {
+        if spawn(driver.name, move || {
             let _ = tx.send((i, (driver.poll)(&api, &infos)));
-        });
-        jobs += 1;
+        }) {
+            jobs.push((i, driver.name));
+        }
     }
     for (j, source) in sources.iter().enumerate() {
         let tx = tx.clone();
-        spawn(source.name, move || {
+        if spawn(source.name, move || {
             let _ = tx.send((drivers.len() + j, (source.poll)()));
-        });
-        jobs += 1;
+        }) {
+            jobs.push((drivers.len() + j, source.name));
+        }
     }
     drop(tx);
 
-    // A late driver keeps running detached; its result is discarded when it finally arrives.
+    // A late driver keeps running detached (and is skipped by later polls until it returns); its
+    // result is discarded when it finally arrives.
     let deadline = Instant::now() + timeout;
-    let mut results = Vec::with_capacity(jobs);
-    while results.len() < jobs {
+    let mut results = Vec::with_capacity(jobs.len());
+    while results.len() < jobs.len() {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok(r) => results.push(r),
             Err(_) => break,
         }
     }
+    for (i, name) in &jobs {
+        if !results.iter().any(|(r, _)| r == i) {
+            eprintln!("driver {name} missed the {} s deadline", timeout.as_secs());
+        }
+    }
     results.sort_by_key(|(i, _)| *i);
     results.into_iter().flat_map(|(_, d)| d).collect()
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
-    if let Err(e) = std::thread::Builder::new()
-        .name(format!("driver-{name}"))
-        .spawn(f)
-    {
-        eprintln!("could not start driver {name}: {e}");
+/// Drivers whose previous run has not returned yet. A driver is never run twice at once, so a slow
+/// device cannot pile up threads or have two runs writing to the same HID handles.
+static RUNNING: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+fn running() -> std::sync::MutexGuard<'static, Vec<&'static str>> {
+    RUNNING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Removes the driver from RUNNING when its thread ends, even by panic.
+struct Done(&'static str);
+
+impl Drop for Done {
+    fn drop(&mut self) {
+        running().retain(|n| *n != self.0);
     }
+}
+
+/// Starts a driver thread unless that driver is still running. Returns whether it started.
+fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> bool {
+    {
+        let mut r = running();
+        if r.contains(&name) {
+            eprintln!("driver {name} still busy from the previous poll; skipped");
+            return false;
+        }
+        r.push(name);
+    }
+    let started = std::thread::Builder::new()
+        .name(format!("driver-{name}"))
+        .spawn(move || {
+            let _done = Done(name);
+            f();
+        });
+    if let Err(e) = started {
+        running().retain(|n| *n != name);
+        eprintln!("could not start driver {name}: {e}");
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -160,6 +200,21 @@ mod tests {
             poll: none,
         },
     ];
+
+    #[test]
+    fn busy_driver_is_not_started_twice() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        assert!(spawn("test-busy", move || {
+            let _ = release_rx.recv();
+        }));
+        assert!(!spawn("test-busy", || {}));
+        release_tx.send(()).unwrap();
+        let start = Instant::now();
+        while running().contains(&"test-busy") && start.elapsed() < Duration::from_secs(2) {
+            std::thread::yield_now();
+        }
+        assert!(spawn("test-busy", || {}));
+    }
 
     #[test]
     fn exact_product_beats_whole_vendor_regardless_of_order() {
