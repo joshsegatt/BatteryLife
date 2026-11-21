@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::Device;
-use crate::{logitech, phonelink};
+use crate::drivers::{bluetooth, generic_hid, logitech, phonelink, xbox};
 
 /// Devices a driver handles: one vendor, and either listed product ids or (empty) the whole vendor.
 pub struct Match {
@@ -41,10 +41,27 @@ pub static HID_DRIVERS: &[HidDriver] = &[HidDriver {
     poll: logitech::poll,
 }];
 
-pub static SOURCES: &[Source] = &[Source {
-    name: "phonelink",
-    poll: || phonelink::poll().into_iter().collect(),
-}];
+/// Gets every HID collection that no vendor driver matched.
+pub static FALLBACK: &HidDriver = &HidDriver {
+    name: "generic-hid",
+    matches: &[],
+    poll: generic_hid::poll,
+};
+
+pub static SOURCES: &[Source] = &[
+    Source {
+        name: "phonelink",
+        poll: || phonelink::poll().into_iter().collect(),
+    },
+    Source {
+        name: "bluetooth",
+        poll: bluetooth::poll,
+    },
+    Source {
+        name: "xbox",
+        poll: xbox::poll,
+    },
+];
 
 /// A driver gets this long; whatever it has not returned by then is dropped for this poll.
 pub const DRIVER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -80,35 +97,38 @@ pub fn pick(drivers: &[HidDriver], vid: u16, pid: u16) -> Option<usize> {
 pub fn poll(
     api: Arc<HidApi>,
     drivers: &'static [HidDriver],
+    fallback: &'static HidDriver,
     sources: &'static [Source],
     timeout: Duration,
 ) -> Vec<Device> {
-    let mut assigned: Vec<Vec<DeviceInfo>> = vec![Vec::new(); drivers.len()];
+    // Index drivers.len() is the fallback, which gets everything no vendor driver matched.
+    let mut assigned: Vec<Vec<DeviceInfo>> = vec![Vec::new(); drivers.len() + 1];
     for info in api.device_list() {
-        if let Some(i) = pick(drivers, info.vendor_id(), info.product_id()) {
-            assigned[i].push(info.clone());
-        }
+        let i = pick(drivers, info.vendor_id(), info.product_id()).unwrap_or(drivers.len());
+        assigned[i].push(info.clone());
     }
 
     let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
     let mut jobs: Vec<(usize, &'static str)> = Vec::new();
-    for (i, (driver, infos)) in drivers.iter().zip(assigned).enumerate() {
+    for (i, infos) in assigned.iter().enumerate() {
         if infos.is_empty() {
             continue;
         }
-        let (tx, api) = (tx.clone(), api.clone());
+        let driver = drivers.get(i).unwrap_or(fallback);
+        let (tx, api, infos) = (tx.clone(), api.clone(), infos.clone());
         if spawn(driver.name, move || {
             let _ = tx.send((i, (driver.poll)(&api, &infos)));
         }) {
             jobs.push((i, driver.name));
         }
     }
+    let first_source = drivers.len() + 1;
     for (j, source) in sources.iter().enumerate() {
         let tx = tx.clone();
         if spawn(source.name, move || {
-            let _ = tx.send((drivers.len() + j, (source.poll)()));
+            let _ = tx.send((first_source + j, (source.poll)()));
         }) {
-            jobs.push((drivers.len() + j, source.name));
+            jobs.push((first_source + j, source.name));
         }
     }
     drop(tx);
@@ -130,7 +150,87 @@ pub fn poll(
         }
     }
     results.sort_by_key(|(i, _)| *i);
-    results.into_iter().flat_map(|(_, d)| d).collect()
+
+    // Physical devices (Windows container ids) a HID driver reported, so the same device seen
+    // again over Bluetooth is listed once. Only worked out when there is a Bluetooth entry.
+    let has_bt = results
+        .iter()
+        .any(|(_, ds)| ds.iter().any(|d| d.key.starts_with("bt:")));
+    let containers = |pred: &dyn Fn(usize) -> bool| -> Vec<String> {
+        if !has_bt {
+            return Vec::new();
+        }
+        // Every collection a vendor driver handles counts, even when it returned nothing this poll
+        // (asleep): the tracker still shows that device, so its Bluetooth copy must stay hidden.
+        (0..assigned.len())
+            .filter(|i| pred(*i))
+            .flat_map(|i| &assigned[i])
+            .filter_map(|info| bluetooth::container_of(info.path()))
+            .map(|c| format!("bt:{c}"))
+            .collect()
+    };
+    let vendor = containers(&|i| i < drivers.len());
+    // The generic HID reading of a Bluetooth device loses to Windows' own level for it.
+    let generic: Vec<(String, String)> = if has_bt {
+        assigned[drivers.len()]
+            .iter()
+            .filter_map(|info| {
+                let c = bluetooth::container_of(info.path())?;
+                Some((
+                    format!("hid:{:04X}:{:04X}", info.vendor_id(), info.product_id()),
+                    format!("bt:{c}"),
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    dedup(
+        results.into_iter().flat_map(|(_, d)| d).collect(),
+        &vendor,
+        &generic,
+    )
+}
+
+/// Drops second readings of one physical device:
+/// - a Bluetooth entry whose container a vendor driver already reported (`vendor_bt_keys`);
+/// - a generic HID entry when Windows lists the same container over Bluetooth (`generic_to_bt`
+///   maps "hid:VID:PID" keys to the "bt:{container}" key of their device);
+/// - Xbox / XInput entries when the controller is already listed over Bluetooth.
+pub fn dedup(
+    devices: Vec<Device>,
+    vendor_bt_keys: &[String],
+    generic_to_bt: &[(String, String)],
+) -> Vec<Device> {
+    let bt_keys: Vec<String> = devices
+        .iter()
+        .filter(|d| d.key.starts_with("bt:"))
+        .map(|d| d.key.clone())
+        .collect();
+    let bt_xbox = devices
+        .iter()
+        .any(|d| d.key.starts_with("bt:") && d.name.contains("Xbox"));
+    // Microsoft (045E) pads read by the Xbox source are not repeated by the generic HID fallback.
+    let xbox_listed = devices
+        .iter()
+        .any(|d| d.key.starts_with("xbox:") || d.key.starts_with("xinput:"));
+    devices
+        .into_iter()
+        .filter(|d| {
+            if d.key.starts_with("bt:") {
+                return !vendor_bt_keys.contains(&d.key);
+            }
+            if d.key.starts_with("hid:") {
+                if xbox_listed && d.key.starts_with("hid:045E:") {
+                    return false;
+                }
+                return !generic_to_bt.iter().any(|(h, b)| {
+                    *h == d.key && bt_keys.contains(b) && !vendor_bt_keys.contains(b)
+                });
+            }
+            !(bt_xbox && (d.key.starts_with("xbox:") || d.key.starts_with("xinput:")))
+        })
+        .collect()
 }
 
 /// Drivers whose previous run has not returned yet. A driver is never run twice at once, so a slow
@@ -180,6 +280,66 @@ mod tests {
 
     fn none(_: &HidApi, _: &[DeviceInfo]) -> Vec<Device> {
         Vec::new()
+    }
+
+    fn dev(key: &str, name: &str) -> Device {
+        Device::new(key, name, crate::device::Kind::Other, "test")
+    }
+
+    #[test]
+    fn bluetooth_copy_of_a_vendor_device_is_dropped() {
+        let out = dedup(
+            vec![
+                dev("logi:unit:1", "MX Master 3S"),
+                dev("bt:{A}", "MX Master 3S"),
+                dev("bt:{B}", "Buds"),
+            ],
+            &["bt:{A}".into()],
+            &[],
+        );
+        let keys: Vec<&str> = out.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["logi:unit:1", "bt:{B}"]);
+    }
+
+    #[test]
+    fn windows_bluetooth_level_beats_generic_hid() {
+        let out = dedup(
+            vec![dev("hid:046D:B023", "Keyboard"), dev("bt:{K}", "Keyboard")],
+            &[],
+            &[("hid:046D:B023".into(), "bt:{K}".into())],
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].key, "bt:{K}");
+    }
+
+    #[test]
+    fn xbox_listed_over_bluetooth_is_not_repeated() {
+        let out = dedup(
+            vec![
+                dev("bt:{X}", "Xbox Wireless Controller"),
+                dev("xbox:0B13:0", "Xbox Wireless Controller"),
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(out.len(), 1);
+        let out = dedup(vec![dev("xinput:0", "Controller 1")], &[], &[]);
+        assert_eq!(out.len(), 1, "no Bluetooth Xbox: keep XInput");
+    }
+
+    #[test]
+    fn generic_hid_does_not_repeat_an_xbox_pad() {
+        let out = dedup(
+            vec![
+                dev("hid:045E:0B13", "Controller"),
+                dev("xbox:0B13:0", "Xbox Wireless Controller"),
+                dev("hid:1234:0001", "Keyboard"),
+            ],
+            &[],
+            &[],
+        );
+        let keys: Vec<&str> = out.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["xbox:0B13:0", "hid:1234:0001"]);
     }
 
     static TWO: &[HidDriver] = &[

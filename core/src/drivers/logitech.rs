@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 
-use crate::device::{Device, Kind, interpolate};
+use crate::device::{Device, Kind, guess_kind, interpolate};
 
 pub const VID: u16 = 0x046D;
 /// Our software id; replies to other apps (G HUB, Options+) carry theirs and are ignored.
@@ -308,19 +308,6 @@ fn stable_key(slot_key: &str, unit: Option<String>) -> String {
             .get(slot_key)
             .cloned()
             .unwrap_or_else(|| slot_key.to_string()),
-    }
-}
-
-fn guess_kind(name: &str) -> Kind {
-    let n = name.to_lowercase();
-    if n.contains("mouse") || n.contains("superlight") {
-        Kind::Mouse
-    } else if n.contains("headset") || n.contains("g435") || n.contains("g733") {
-        Kind::Headset
-    } else if n.contains("keyboard") || n.contains("keys") {
-        Kind::Keyboard
-    } else {
-        Kind::Other
     }
 }
 
