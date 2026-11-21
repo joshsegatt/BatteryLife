@@ -1,7 +1,8 @@
 name: release
 
-# Pushing a tag like v0.1.0 builds a portable zip that runs on any Windows 11 x64 PC (the .NET
-# runtime and the Windows App SDK ship inside it) and publishes it as a GitHub release.
+# Pushing a tag like v0.1.0 builds an installer (BatteryLife-Setup-vX.Y.Z.exe) and a portable zip,
+# both running on any Windows 11 x64 PC (the .NET runtime and the Windows App SDK ship inside), and
+# publishes them as a GitHub release.
 on:
   push:
     tags: ["v[0-9]*"]
@@ -57,12 +58,29 @@ jobs:
           $out = (Get-ChildItem app/BatteryLife.App/bin/x64/Release -Recurse -Filter BatteryLife.exe | Select-Object -First 1).DirectoryName
           Copy-Item LICENSE, README.md $out
           $zip = "BatteryLife-$env:GITHUB_REF_NAME-win-x64.zip"
-          Compress-Archive -Path "$out\*" -DestinationPath $zip
-          # LF line ending, so "sha256sum -c" on Linux or WSL reads it too.
-          [IO.File]::WriteAllText("$PWD/$zip.sha256", (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip`n")
           "ZIP=$zip" >> $env:GITHUB_ENV
+          "APP_DIR=$out" >> $env:GITHUB_ENV
+          Compress-Archive -Path "$out\*" -DestinationPath $zip
+
+      # Pinned, like the actions above.
+      - name: Install Inno Setup
+        run: choco install innosetup --version 6.7.1 -y --no-progress
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          "SETUP=BatteryLife-Setup-v$version.exe" >> $env:GITHUB_ENV
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" "/DSourceDir=$env:APP_DIR" "/DOutputDir=$PWD" installer\BatteryLife.iss
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          # One "hash  name" line per file with LF endings, so "sha256sum -c SHA256SUMS" works too.
+          $lines = foreach ($f in $env:SETUP, $env:ZIP) { (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() + "  $f`n" }
+          [IO.File]::WriteAllText("$PWD/SHA256SUMS", -join $lines)
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" "$env:ZIP" "$env:ZIP.sha256" --title "BatteryLife $env:GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" "$env:SETUP" "$env:ZIP" SHA256SUMS --title "BatteryLife $env:GITHUB_REF_NAME" --generate-notes
