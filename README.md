@@ -121,8 +121,9 @@ Design decisions live in [`PRODUCT.md`](PRODUCT.md) and [`DESIGN.md`](DESIGN.md)
 If BatteryLife saves you from a dead headset mid-match:
 
 - ⭐ **Star the repo.** It helps other gamers find it.
+- 💛 **Donate:** [![Donate with PayPal](https://img.shields.io/badge/PayPal-Donate-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=segatt22%40gmail.com&item_name=BatteryLife) Donations pay for test hardware, so more drivers move from "ported" to "verified".
 - Share it with your squad or your favourite peripheral subreddit.
-- Sponsorship is not set up yet. If you or your company want to sponsor development or hardware for testing, open an issue and we'll talk.
+- Want to sponsor development or lend hardware for testing? Open an issue and we'll talk.
 
 ## Credits and license
 
@@ -134,6 +135,6 @@ BatteryLife is free software under the [GNU General Public License v3.0](LICENSE
 
 ### Em português
 
-O BatteryLife mostra, na bandeja do Windows 11, qual aparelho sem fio vai acabar primeiro e quanto tempo ele ainda tem. A faixa fica preta e calma quando está tudo bem e amarela só quando algo precisa carregar. Ele lê mouses, headsets, teclados, controles e o celular (pelo Phone Link), e nunca muda configuração nenhuma do aparelho. Achou um aparelho que não aparece? [Abra uma issue](https://github.com/joshsegatt/BatteryLife/issues/new).
+O BatteryLife mostra, na bandeja do Windows 11, qual aparelho sem fio vai acabar primeiro e quanto tempo ele ainda tem. A faixa fica preta e calma quando está tudo bem e amarela só quando algo precisa carregar. Ele lê mouses, headsets, teclados, controles e o celular (pelo Phone Link), e nunca muda configuração nenhuma do aparelho. Achou um aparelho que não aparece? [Abra uma issue](https://github.com/joshsegatt/BatteryLife/issues/new). Quer apoiar? [Doe pelo PayPal](https://www.paypal.com/donate/?business=segatt22%40gmail.com&item_name=BatteryLife): as doações compram aparelhos para testar os drivers.
 
 <img src="docs/images/panel-action.png" alt="Painel do BatteryLife em português, com a faixa amarela 'Carregue o headset antes de jogar' e '2 h 10 min'" width="380">
