@@ -4,7 +4,7 @@ name: release
 # runtime and the Windows App SDK ship inside it) and publishes it as a GitHub release.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]*"]
 
 permissions:
   contents: write # create the release
@@ -18,10 +18,17 @@ jobs:
     steps:
       # Same pinned actions as ci.yml.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # The write token must not sit in .git/config while dependency build scripts run.
+          persist-credentials: false
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
         with:
           global-json-file: app/global.json
 
+      # One command per step: pwsh only fails a step on the exit code of its last command.
+      - name: Test the reader
+        working-directory: core
+        run: cargo test --locked
       - name: Build the reader
         working-directory: core
         run: cargo build --release --locked
@@ -57,4 +64,4 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" "$env:ZIP" "$env:ZIP.sha256" --title "BatteryLife $env:GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" "$env:ZIP" "$env:ZIP.sha256" --title "BatteryLife $env:GITHUB_REF_NAME" --generate-notes

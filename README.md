@@ -75,6 +75,8 @@ BatteryHub is the project whose device research made BatteryLife possible, and i
 2. Extract it to a folder that will stay put, for example `%LOCALAPPDATA%\BatteryLife` (the "Start with Windows" option points to this folder).
 3. Run `BatteryLife.exe`. The release is not code-signed yet, so Windows SmartScreen may say *Windows protected your PC*: click **More info**, then **Run anyway**. You can check the download against the `.sha256` file next to it in the release.
 
+To uninstall, turn off **Start with Windows** in the tray menu, quit, and delete the folder.
+
 ### Build from source
 
 1. Install [Rust](https://rustup.rs/) and the [.NET 10 SDK](https://dotnet.microsoft.com/download).
