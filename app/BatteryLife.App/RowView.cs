@@ -3,28 +3,26 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 
 namespace BatteryLife.App;
 
 /// <summary>Builds one device row of the flyout: pictogram, name and state, level and time left.</summary>
 public static class RowView
 {
-    private static T Res<T>(string key) => (T)Application.Current.Resources[key];
-
     public static UIElement Build(DeviceReading d, Text text)
     {
         var level = text.Level(d);
         var subtitle = text.RowSubtitle(d);
         var time = text.RowTime(d);
+        // An asleep reading dims only its pictogram and level; the words keep full contrast.
+        double dim = d.Asleep ? 0.55 : 1.0;
 
         var row = new Grid
         {
             Padding = new Thickness(18, 12, 18, 12),
             ColumnSpacing = 12,
             BorderThickness = new Thickness(0, 1, 0, 0),
-            BorderBrush = Res<Brush>("SignRuleBrush"),
-            Opacity = d.Asleep ? 0.55 : 1.0,
+            BorderBrush = Palette.Brush("SignRuleBrush"),
         };
         AutomationProperties.SetName(row, $"{d.Name}, {level}, {subtitle}{(time.Length > 0 ? ", " + time : "")}");
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
@@ -35,8 +33,9 @@ public static class RowView
         {
             Width = 36,
             Height = 36,
-            Background = Res<Brush>("SignRaisedBrush"),
-            Child = Icon(Pictograms.For(d.Kind), 18),
+            Opacity = dim,
+            Background = Palette.Brush("SignRaisedBrush"),
+            Child = Icon(Pictograms.For(d.Kind), 18, "SignTextBrush"),
         });
 
         var names = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Spacing = 2 };
@@ -45,12 +44,28 @@ public static class RowView
         Grid.SetColumn(names, 1);
         row.Children.Add(names);
 
-        var levelLine = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 4 };
-        if (d.Charging) levelLine.Children.Add(Icon("", 14));
-        var levelText = Line(level, 22, FontWeights.SemiBold, "SignTextBrush");
-        levelText.FontFamily = Res<FontFamily>("SignDisplayFont");
-        levelLine.Children.Add(levelText);
-        var right = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+        var levelLine = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 4,
+            Opacity = dim,
+        };
+        if (d.Charging) levelLine.Children.Add(Icon("", 14, "SignTextBrush"));
+        if (Text.NeedsCharge(d))
+        {
+            // The band's yellow at element scale: this row is the one to act on.
+            var tag = Line(level, 20, FontWeights.Bold, "SignInkBrush");
+            tag.FontFamily = Palette.Font("SignDisplayFont");
+            levelLine.Children.Add(new Border { Background = Palette.Brush("SignYellowBrush"), Padding = new Thickness(7, 1, 7, 2), Child = tag });
+        }
+        else
+        {
+            var levelText = Line(level, 22, FontWeights.SemiBold, "SignTextBrush");
+            levelText.FontFamily = Palette.Font("SignDisplayFont");
+            levelLine.Children.Add(levelText);
+        }
+        var right = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 2 };
         right.Children.Add(levelLine);
         if (time.Length > 0)
         {
@@ -68,16 +83,16 @@ public static class RowView
         Text = s,
         FontSize = size,
         FontWeight = weight,
-        Foreground = Res<Brush>(brush),
+        Foreground = Palette.Brush(brush),
         TextTrimming = TextTrimming.CharacterEllipsis,
     };
 
-    private static FontIcon Icon(string glyph, double size) => new()
+    private static FontIcon Icon(string glyph, double size, string brush) => new()
     {
         Glyph = glyph,
         FontSize = size,
-        FontFamily = Res<FontFamily>("PictogramFont"),
-        Foreground = Res<Brush>("SignTextBrush"),
+        FontFamily = Palette.Font("PictogramFont"),
+        Foreground = Palette.Brush(brush),
     };
 }
 

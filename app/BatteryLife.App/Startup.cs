@@ -25,4 +25,13 @@ public static class Startup
         if (enabled) key.SetValue(Name, Command);
         else key.DeleteValue(Name, throwOnMissingValue: false);
     }
+
+    /// <summary>True only the first time it is asked on this Windows account.</summary>
+    public static bool IsFirstRun()
+    {
+        using var key = Registry.CurrentUser.CreateSubKey(@"Software\BatteryLife");
+        if (key.GetValue("FirstRunDone") is not null) return false;
+        key.SetValue("FirstRunDone", 1, RegistryValueKind.DWord);
+        return true;
+    }
 }

@@ -5,6 +5,7 @@ using H.NotifyIcon;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.Windows.AppNotifications;
 using Microsoft.Windows.AppNotifications.Builder;
@@ -40,20 +41,35 @@ public partial class App : Application
         _text = Text.For(CultureInfo.CurrentUICulture);
         _flyout = new FlyoutWindow(_text, () => _core?.Refresh(), Quit);
 
-        var toggle = new Command(() => _flyout.Toggle());
+        // Left click opens the hub; right click shows the native Windows menu, as tray users expect.
+        var startup = new ToggleMenuFlyoutItem { Text = _text.StartWithWindows, IsChecked = Startup.IsEnabled };
+        startup.Command = new Command(() => { Startup.Set(!Startup.IsEnabled); startup.IsChecked = Startup.IsEnabled; });
+        var menu = new MenuFlyout();
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Open, Command = new Command(() => _flyout.Toggle()) });
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Refresh, Command = new Command(() => _core?.Refresh()) });
+        menu.Items.Add(startup);
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Exit, Command = new Command(Quit) });
         _tray = new TaskbarIcon
         {
             ToolTipText = "BatteryLife",
             NoLeftClickDelay = true,
-            LeftClickCommand = toggle,
-            RightClickCommand = toggle,
+            LeftClickCommand = new Command(() => _flyout.Toggle()),
+            ContextMenuMode = ContextMenuMode.PopupMenu,
+            ContextFlyout = menu,
             IconSource = TrayIcon(Board.From([])),
         };
         _tray.ForceCreate(enablesEfficiencyMode: false);
 
         try
         {
-            AppNotificationManager.Default.NotificationInvoked += (_, _) => _ui.TryEnqueue(() => _flyout.Toggle());
+            AppNotificationManager.Default.NotificationInvoked += (sender, e) => _ui.TryEnqueue(() =>
+            {
+                if (e.Arguments.TryGetValue("action", out var action) && action == "pin")
+                    _ = Windows.System.Launcher.LaunchUriAsync(new Uri("ms-settings:taskbar"));
+                else
+                    _flyout.Toggle();
+            });
             AppNotificationManager.Default.Register();
             _toasts = true;
         }
@@ -61,6 +77,9 @@ public partial class App : Application
         {
             _toasts = false; // fall back to the tray balloon
         }
+
+        // Windows puts new tray icons in the ^ overflow and no app may pin itself: show the way once.
+        if (Startup.IsFirstRun()) Show(_text.WelcomeTitle, _text.WelcomeBody, (_text.PinIcon, "pin"));
 
         var argv = Environment.GetCommandLineArgs();
         _openOnFirstUpdate = argv.Contains("--open");
@@ -118,14 +137,17 @@ public partial class App : Application
         };
     }
 
-    private void Notify(DeviceReading d)
+    private void Notify(DeviceReading d) => Show(_text.NotificationTitle(d), _text.NotificationBody(d));
+
+    private void Show(string title, string body, (string Label, string Action)? button = null)
     {
-        string title = _text.NotificationTitle(d), body = _text.NotificationBody(d);
         if (_toasts)
         {
             try
             {
-                AppNotificationManager.Default.Show(new AppNotificationBuilder().AddText(title).AddText(body).BuildNotification());
+                var toast = new AppNotificationBuilder().AddText(title).AddText(body);
+                if (button is { } b) toast.AddButton(new AppNotificationButton(b.Label).AddArgument("action", b.Action));
+                AppNotificationManager.Default.Show(toast.BuildNotification());
                 return;
             }
             catch (Exception)

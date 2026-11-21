@@ -102,8 +102,8 @@ public class LogicTests
         var pt = Text.For(new CultureInfo("pt-BR"));
         var en = Text.For(new CultureInfo("en-US"));
         var b = Board.From([Dev("h", 18 - 5, "headset", minutes: 130)]);
-        Assert.Equal("Carregue o headset antes da próxima partida", pt.Headline(b));
-        Assert.Equal("Charge the headset before your next match", en.Headline(b));
+        Assert.Equal("Carregue o headset antes de jogar", pt.Headline(b));
+        Assert.Equal("Charge the headset before you play", en.Headline(b));
         Assert.Equal("2 h 10 min", pt.Figure(b));
     }
 
@@ -115,7 +115,18 @@ public class LogicTests
         Assert.Equal(BoardState.AllGood, b.State);
         Assert.Equal("Nada para carregar agora", pt.Headline(b));
         Assert.Equal("21 h", pt.Figure(b));
-        Assert.Equal("até descarregar o headset · Cloud III · 64%", pt.Detail(b));
+        Assert.Equal("Cloud III · 64% · até descarregar", pt.Detail(b));
+    }
+
+    [Fact]
+    public void Low_row_says_charge_now_unless_charging()
+    {
+        var pt = Text.For(new CultureInfo("pt-BR"));
+        Assert.Equal("Headset · carregar agora", pt.RowSubtitle(Dev("h", 14, "headset")));
+        Assert.True(Text.NeedsCharge(Dev("h", 15)));
+        Assert.False(Text.NeedsCharge(Dev("h", 14, charging: true)));
+        Assert.False(Text.NeedsCharge(Dev("h", 16)));
+        Assert.Equal("Headset · carregando", pt.RowSubtitle(Dev("h", 14, "headset", charging: true)));
     }
 
     [Fact]

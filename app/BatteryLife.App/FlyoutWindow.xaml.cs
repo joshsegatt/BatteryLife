@@ -37,6 +37,12 @@ public sealed partial class FlyoutWindow : Window
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
         AppWindow.Title = "BatteryLife";
+        // Windows 11 frame: rounded corners and a hairline in the sign's rule color.
+        var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+        int round = 2; // DWMWCP_ROUND
+        DwmSetWindowAttribute(hwnd, 33, ref round, sizeof(int)); // DWMWA_WINDOW_CORNER_PREFERENCE
+        int border = 0x002A2A2A; // COLORREF 0x00BBGGRR
+        DwmSetWindowAttribute(hwnd, 34, ref border, sizeof(int)); // DWMWA_BORDER_COLOR
         Activated += (_, e) =>
         {
             if (e.WindowActivationState == WindowActivationState.Deactivated && !Pinned) Hide();
@@ -71,7 +77,25 @@ public sealed partial class FlyoutWindow : Window
         PlaceAboveTray();
         AppWindow.Show();
         Activate();
+        SlideIn();
         _refresh();
+    }
+
+    /// <summary>Rises from the taskbar like Quick Settings: a short slide up and fade in.</summary>
+    private void SlideIn()
+    {
+        if (!Palette.Animations) return;
+        var ease = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 6 };
+        var rise = new DoubleAnimation { From = 14, To = 0, Duration = TimeSpan.FromMilliseconds(260), EasingFunction = ease };
+        var fade = new DoubleAnimation { From = 0, To = 1, Duration = TimeSpan.FromMilliseconds(160) };
+        Storyboard.SetTarget(rise, Slide);
+        Storyboard.SetTargetProperty(rise, nameof(TranslateTransform.Y));
+        Storyboard.SetTarget(fade, Root);
+        Storyboard.SetTargetProperty(fade, nameof(UIElement.Opacity));
+        var sb = new Storyboard();
+        sb.Children.Add(rise);
+        sb.Children.Add(fade);
+        sb.Begin();
     }
 
     private void Hide()
@@ -83,23 +107,25 @@ public sealed partial class FlyoutWindow : Window
 
     public void Render(Board board, bool animate = true)
     {
-        var action = board.State is BoardState.Action or BoardState.Critical;
-        var fg = (SolidColorBrush)Application.Current.Resources[action ? "SignInkBrush" : "SignTextBrush"];
-        Band.Background = (Brush)Application.Current.Resources[action ? "SignYellowBrush" : "SignRaisedBrush"];
-        Headline.Foreground = Figure.Foreground = Detail.Foreground = fg;
-        BandPictogram.Background = (Brush)Application.Current.Resources[action ? "SignInkBrush" : "SignRuleBrush"];
-        BandIcon.Glyph = board.Lead is { } lead ? Pictograms.For(lead.Kind) : "";
-
         var headline = _text.Headline(board);
+        // Everything on the plate changes together, at the fold of the flip, never before it.
         void Apply()
         {
+            var action = board.State is BoardState.Action or BoardState.Critical;
+            Band.Background = Palette.Brush(action ? "SignYellowBrush" : "SignRaisedBrush");
+            Headline.Foreground = Figure.Foreground = Detail.Foreground = Palette.Brush(action ? "SignInkBrush" : "SignTextBrush");
+            BandPictogram.Background = Palette.Brush(action ? "SignInkBrush" : "SignRuleBrush");
+            BandIcon.Foreground = Palette.Brush(action ? "SignYellowBrush" : "SignTextBrush");
+            BandIcon.Glyph = Pictograms.For(board.Lead?.Kind ?? "");
+
             Headline.Text = headline;
-            Figure.Text = _text.Figure(board);
-            Figure.Visibility = Figure.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            var figure = _text.Figure(board);
+            SetFigure(figure);
+            Figure.Visibility = figure.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             Detail.Text = _text.Detail(board);
-            AutomationProperties.SetName(Band, $"{Headline.Text}. {Figure.Text}. {Detail.Text}");
+            AutomationProperties.SetName(Band, $"{headline}. {figure}. {Detail.Text}");
         }
-        if (animate && headline != _shownHeadline && IsOpen && new Windows.UI.ViewManagement.UISettings().AnimationsEnabled)
+        if (animate && headline != _shownHeadline && IsOpen && Palette.Animations)
             FlipBand(Apply);
         else
             Apply();
@@ -108,6 +134,23 @@ public sealed partial class FlyoutWindow : Window
         Rows.Children.Clear();
         foreach (var d in board.Devices) Rows.Children.Add(RowView.Build(d, _text));
         if (IsOpen) PlaceAboveTray();
+    }
+
+    /// <summary>Sets "2 h 10 min" with the numbers at full size and the units smaller and lighter,
+    /// so the number reads first, as on a departure board.</summary>
+    private void SetFigure(string figure)
+    {
+        Figure.Inlines.Clear();
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(figure, @"\d+|\D+"))
+        {
+            bool number = char.IsDigit(m.Value[0]);
+            Figure.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run
+            {
+                Text = m.Value,
+                FontSize = number ? 40 : 24,
+                FontWeight = number ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.SemiBold,
+            });
+        }
     }
 
     /// <summary>The signature move: the band turns over like a split-flap sign when the next
@@ -170,4 +213,7 @@ public sealed partial class FlyoutWindow : Window
 
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 }

@@ -52,8 +52,8 @@ public sealed class Text
     {
         BoardState.NoDevices => T("Nenhum aparelho sem fio encontrado", "No wireless devices found"),
         BoardState.Critical => T($"Carregue {KindInSentence(b.Lead!.Kind)} agora", $"Charge {KindInSentence(b.Lead!.Kind)} now"),
-        BoardState.Action => T($"Carregue {KindInSentence(b.Lead!.Kind)} antes da próxima partida",
-                               $"Charge {KindInSentence(b.Lead!.Kind)} before your next match"),
+        BoardState.Action => T($"Carregue {KindInSentence(b.Lead!.Kind)} antes de jogar",
+                               $"Charge {KindInSentence(b.Lead!.Kind)} before you play"),
         _ => T("Nada para carregar agora", "Nothing to charge right now"),
     };
 
@@ -78,24 +78,28 @@ public sealed class Text
             return d.MinutesLeft is null
                 ? T($"Próximo a carregar: {string.Join(" · ", parts)}", $"Next to charge: {string.Join(" · ", parts)}")
                 // The figure is a time: say what it counts down to.
-                : T($"até descarregar {KindInSentence(d.Kind)} · {string.Join(" · ", parts)}",
-                    $"until {KindInSentence(d.Kind)} runs out · {string.Join(" · ", parts)}");
+                : T($"{string.Join(" · ", parts)} · até descarregar", $"{string.Join(" · ", parts)} · until it runs out");
         if (d.MinutesLeft is not null) parts.Add(T("até desligar", "until it shuts off"));
         return string.Join(" · ", parts);
     }
 
     /// <summary>Row's second line: "Mouse · Logitech receiver", "Teclado · carregando".</summary>
-    public string RowSubtitle(DeviceReading d)
+    public string RowSubtitle(DeviceReading d, int threshold = Board.DefaultThreshold)
     {
         string state = d switch
         {
             { Full: true } => T("carregado", "charged"),
             { Charging: true } => T("carregando", "charging"),
             { Asleep: true } => T("dormindo · último valor", "asleep · last value"),
+            _ when NeedsCharge(d, threshold) => T("carregar agora", "charge now"),
             _ => d.Via,
         };
         return $"{KindName(d.Kind)} · {state}";
     }
+
+    /// <summary>The row's level is set as a yellow tag: same rule as the band, at element scale.</summary>
+    public static bool NeedsCharge(DeviceReading d, int threshold = Board.DefaultThreshold) =>
+        d.Percent is int p && p <= threshold && !d.Charging;
 
     /// <summary>Row's small line under the level: time left, or nothing.</summary>
     public string RowTime(DeviceReading d) => d.MinutesLeft is int m && !d.Charging ? Duration(m) : "";
@@ -109,6 +113,11 @@ public sealed class Text
     public string Settings => T("Configurações", "Settings");
     public string CoreMissing => T("Não foi possível iniciar a leitura dos aparelhos", "Could not start reading devices");
 
+    public string WelcomeTitle => T("O BatteryLife está na bandeja", "BatteryLife is in the tray");
+    public string WelcomeBody => T(
+        "Para ver a bateria sempre, abra a seta ^ perto do relógio e arraste o ícone amarelo para a barra.",
+        "To always see your battery, open the ^ arrow next to the clock and drag the yellow icon onto the taskbar.");
+
     public string NotificationTitle(DeviceReading d) => T($"{d.Name} com {d.Percent}%", $"{d.Name} at {d.Percent}%");
     public string NotificationBody(DeviceReading d) => d.MinutesLeft is int m
         ? T($"Cerca de {Duration(m)} até desligar. Hora de carregar.", $"About {Duration(m)} until it shuts off. Time to charge.")
@@ -117,5 +126,8 @@ public sealed class Text
     /// <summary>Tray tooltip: one line per device.</summary>
     public string Tooltip(IReadOnlyList<DeviceReading> devices) => devices.Count == 0
         ? "BatteryLife"
-        : string.Join("\n", devices.Select(d => $"{d.Name}: {Level(d)}{(d.Charging ? " ⚡" : "")}"));
+        : string.Join("\n", devices.Select(d => $"{d.Name}: {Level(d)}{(d.Charging ? T(", carregando", ", charging") : "")}"));
+
+    public string Open => T("Abrir", "Open");
+    public string PinIcon => T("Fixar na barra", "Pin to taskbar");
 }

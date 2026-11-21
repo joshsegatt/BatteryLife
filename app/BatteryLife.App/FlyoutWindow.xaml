@@ -4,43 +4,46 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="BatteryLife">
 
-    <Grid x:Name="Root" Background="{StaticResource SignGroundBrush}" RequestedTheme="Dark">
+    <Grid x:Name="Root" Background="{ThemeResource SignGroundBrush}" RequestedTheme="Dark">
+        <Grid.RenderTransform>
+            <TranslateTransform x:Name="Slide" />
+        </Grid.RenderTransform>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- The sign band: the single next decision. Yellow only when something needs charging. -->
+        <!-- The sign band: the single next decision. Yellow only when something needs charging.
+             The whole plate turns over (split-flap) when that decision changes. -->
         <Grid x:Name="Band" Padding="18,18,18,20" ColumnSpacing="14" AutomationProperties.LiveSetting="Polite">
+            <Grid.Projection>
+                <PlaneProjection x:Name="Flap" />
+            </Grid.Projection>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="56" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <Border x:Name="BandPictogram" Width="56" Height="56" VerticalAlignment="Center"
-                    Background="{StaticResource SignInkBrush}">
-                <FontIcon x:Name="BandIcon" FontFamily="{StaticResource PictogramFont}" FontSize="28"
-                          Foreground="{StaticResource SignTextBrush}" Glyph="&#xE772;" />
+            <Border x:Name="BandPictogram" Width="56" Height="56" VerticalAlignment="Center">
+                <FontIcon x:Name="BandIcon" FontFamily="{StaticResource PictogramFont}" FontSize="28" Glyph="&#xE772;" />
             </Border>
-            <StackPanel x:Name="BandText" Grid.Column="1" VerticalAlignment="Center" Spacing="4">
-                <StackPanel.Projection>
-                    <PlaneProjection x:Name="Flap" />
-                </StackPanel.Projection>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                 <TextBlock x:Name="Headline" FontFamily="{StaticResource SignFont}" FontSize="15"
                            FontWeight="SemiBold" TextWrapping="WrapWholeWords" MaxLines="2" />
+                <!-- Number at full weight, units lighter and smaller, so the number reads first. -->
                 <TextBlock x:Name="Figure" FontFamily="{StaticResource SignDisplayFont}" FontSize="40"
                            FontWeight="Bold" CharacterSpacing="-20" LineHeight="44"
                            LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis" />
                 <TextBlock x:Name="Detail" FontFamily="{StaticResource SignFont}" FontSize="12"
-                           TextWrapping="WrapWholeWords" MaxLines="2" Opacity="0.85" />
+                           TextWrapping="WrapWholeWords" MaxLines="2" />
             </StackPanel>
         </Grid>
 
         <!-- One row per device, in the order they were first seen (built in RowView). -->
         <StackPanel x:Name="Rows" Grid.Row="1" />
 
-        <Grid Grid.Row="2" Padding="18,6,10,8" BorderThickness="0,1,0,0" BorderBrush="{StaticResource SignRuleBrush}">
-            <TextBlock x:Name="Footer" VerticalAlignment="Center" FontSize="12" Foreground="{StaticResource SignMutedBrush}" />
+        <Grid Grid.Row="2" Padding="18,6,10,8" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource SignRuleBrush}">
+            <TextBlock x:Name="Footer" VerticalAlignment="Center" FontSize="12" Foreground="{ThemeResource SignMutedBrush}" />
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">
                 <Button x:Name="RefreshButton" Click="OnRefresh" Background="Transparent" BorderThickness="0" Padding="8">
                     <FontIcon FontFamily="{StaticResource PictogramFont}" FontSize="14" Glyph="&#xE72C;" />
