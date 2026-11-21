@@ -89,30 +89,41 @@ fn next_tid() -> u16 {
     *t
 }
 
-/// Battery reply payload. None when the write failed or nothing answered (which the buds dongle
-/// does with both buds in the case).
-fn get_battery(io: &mut dyn Dev, min_payload: usize) -> Option<Vec<u8>> {
+/// What one battery request got.
+enum Battery {
+    /// The request was not sent.
+    Failed,
+    /// Sent, but nothing answered (what the buds dongle does with both buds in the case).
+    Silent,
+    Payload(Vec<u8>),
+}
+
+/// Battery reply payload.
+fn get_battery(io: &mut dyn Dev, min_payload: usize) -> Battery {
     let tid = next_tid();
     io.flush();
     if !io.write(&request(tid)) {
-        return None;
+        return Battery::Failed;
     }
     let end = Instant::now() + hid::MAX_WAIT;
     loop {
         let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
         if left == 0 {
-            return None;
+            return Battery::Silent;
         }
-        let r = io
+        let Some(r) = io
             .read(Duration::from_millis(left))
-            .filter(|r| r.len() >= 15)?;
+            .filter(|r| r.len() >= 15)
+        else {
+            return Battery::Silent;
+        };
         if let Some(e) = parse_event(&r)
             && e.id == 0x04
             && e.tid == tid
             && e.payload.len() >= min_payload
             && (e.kind == 0x10 || e.kind == 0xA0)
         {
-            return Some(e.payload); // RET or active notification
+            return Battery::Payload(e.payload); // RET or active notification
         }
     }
 }
@@ -121,29 +132,32 @@ fn level(v: u8) -> Option<u8> {
     (v <= 100).then_some(v)
 }
 
-/// Device from a battery reply payload; None when the headset is off (or both buds are out).
-pub fn device(pid: u16, name: &str, buds: bool, p: &[u8]) -> Option<Device> {
-    let mut d = Device::new(
+fn base(pid: u16, name: &str) -> Device {
+    Device::new(
         format!("inzone:{pid:04X}"),
         name,
         Kind::Headset,
         "2.4 GHz receiver",
-    );
+    )
+}
+
+/// Device from a battery reply payload; `off` when the headset is off (or both buds are out).
+pub fn device(pid: u16, name: &str, buds: bool, p: &[u8]) -> Device {
+    let mut d = base(pid, name);
     if buds {
         let (left, right) = (level(p[1]), level(p[3]));
         d.percent = match (left, right) {
             (Some(l), Some(r)) => Some(l.min(r)),
             (l, r) => l.or(r),
         };
-        d.percent?;
+        d.off = d.percent.is_none();
+    } else if p[1] == 0xFF {
+        d.off = true;
     } else {
-        if p[1] == 0xFF {
-            return None;
-        }
         d.percent = level(p[1]);
         d.charging = p[0] != 0;
     }
-    Some(d)
+    d
 }
 
 pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
@@ -155,13 +169,25 @@ pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     ];
     let mut out = Vec::new();
     for &(pid, name, buds, min_payload) in MODELS {
+        let (mut added, mut no_reply) = (false, false);
         for c in find(colls, VID, pid, |c| c.page == 0xFF04 && c.out_len >= 64) {
             let Some(mut io) = hid.open(c) else { continue };
-            // No reply from the buds dongle means both buds are in the case: not listed.
-            if let Some(p) = get_battery(io.as_mut(), min_payload) {
-                out.extend(device(pid, name, buds, &p));
-                break;
+            match get_battery(io.as_mut(), min_payload) {
+                Battery::Payload(p) => {
+                    out.push(device(pid, name, buds, &p));
+                    added = true;
+                    break;
+                }
+                Battery::Silent => no_reply = true,
+                Battery::Failed => {}
             }
+        }
+        // The buds dongle took the request but nothing answered: both buds are in the case, so
+        // they are listed switched off rather than the dongle being treated as missing.
+        if buds && no_reply && !added {
+            let mut d = base(pid, name);
+            d.off = true;
+            out.push(d);
         }
     }
     out
@@ -220,16 +246,36 @@ mod tests {
 
     #[test]
     fn headset_and_buds_devices() {
-        let d = device(0x0FA8, "Sony INZONE H9 II", false, &[1, 80]).unwrap();
+        let d = device(0x0FA8, "Sony INZONE H9 II", false, &[1, 80]);
         assert_eq!(
-            (d.percent, d.charging, d.key.as_str()),
-            (Some(80), true, "inzone:0FA8")
+            (d.percent, d.charging, d.key.as_str(), d.off),
+            (Some(80), true, "inzone:0FA8", false)
         );
-        assert!(device(0x0FA8, "H9", false, &[0, 0xFF]).is_none());
+        // Headset off: same key, switched off.
+        let off = device(0x0FA8, "H9", false, &[0, 0xFF]);
+        assert_eq!(
+            (off.off, off.percent, off.key.as_str()),
+            (true, None, "inzone:0FA8")
+        );
         let buds = |l, r| device(0x0EC2, "Buds", true, &[0, l, 0, r, 0, 50]);
-        assert_eq!(buds(70, 60).unwrap().percent, Some(60));
-        assert_eq!(buds(0xFF, 60).unwrap().percent, Some(60));
-        assert!(buds(0xFF, 0xFF).is_none());
+        assert_eq!(buds(70, 60).percent, Some(60));
+        assert_eq!(buds(0xFF, 60).percent, Some(60));
+        assert!(buds(0xFF, 0xFF).off);
+    }
+
+    #[test]
+    fn silent_buds_dongle_lists_the_buds_switched_off() {
+        let c = Coll::new(VID, 0x0EC2, 0xFF04, 1, 64, 64);
+        let out = poll_colls(std::slice::from_ref(&c), &mut Fake::new());
+        assert_eq!((out.len(), out[0].off), (1, true));
+        assert_eq!(out[0].key, "inzone:0EC2");
+        // A headset dongle that does not answer is not listed (BatteryHub treats it as missing).
+        let h5 = Coll::new(VID, 0x0EBF, 0xFF04, 1, 64, 64);
+        assert!(poll_colls(&[h5], &mut Fake::new()).is_empty());
+        // The request could not be sent: nothing.
+        let mut f = Fake::new();
+        f.s().refuse_send = true;
+        assert!(poll_colls(&[c], &mut f).is_empty());
     }
 
     #[test]

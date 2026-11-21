@@ -87,12 +87,20 @@ fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
+            let key = format!("eweadn:{}:{}", hex4(VID), hex4(pid));
+            let (name, via) = if cable {
+                ("EWEADN S9 Ultra", "USB cable")
+            } else {
+                ("EWEADN wireless mouse", "2.4 GHz receiver")
+            };
             if !cable {
                 let Some(online) = query(d.as_mut(), io, 0x47, 0x00) else {
                     continue;
                 };
                 if online[0] != 1 {
-                    break; // receiver present, mouse off or out of range (BatteryHub hides it)
+                    // Receiver present, mouse off or out of range: hidden at once.
+                    out.push(Device::switched_off(key, name, Kind::Mouse, via));
+                    break;
                 }
             }
             let Some((pct, charging)) =
@@ -100,20 +108,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
             else {
                 continue;
             };
-            let mut s = Device::new(
-                format!("eweadn:{}:{}", hex4(VID), hex4(pid)),
-                if cable {
-                    "EWEADN S9 Ultra"
-                } else {
-                    "EWEADN wireless mouse"
-                },
-                Kind::Mouse,
-                if cable {
-                    "USB cable"
-                } else {
-                    "2.4 GHz receiver"
-                },
-            );
+            let mut s = Device::new(key, name, Kind::Mouse, via);
             s.percent = Some(pct);
             s.charging = charging;
             s.grace = Duration::from_secs(600);
@@ -185,7 +180,10 @@ mod tests {
             fake::queued(s, fc, op)
         });
         f.s().pad_features = true;
-        assert!(poll_with(&[coll(VID, RECEIVER, 2, 0xFF00, 1, 0, 0, 64)], &mut f).is_empty());
+        let out = poll_with(&[coll(VID, RECEIVER, 2, 0xFF00, 1, 0, 0, 64)], &mut f);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].off && out[0].percent.is_none());
+        assert_eq!(out[0].key, "eweadn:372E:103D");
         assert_eq!(
             f.s().sends(),
             1,

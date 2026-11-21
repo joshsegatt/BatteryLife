@@ -103,6 +103,7 @@ pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     // for charging (the cable collection times out while the keyboard is in 2.4 GHz mode).
     products.sort_by_key(|p| *p != DONGLE);
 
+    let mut answered_offline = false;
     for pid in products {
         for c in colls.iter().filter(|c| {
             c.is(VID, pid)
@@ -117,8 +118,11 @@ pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
             };
             match query(port.as_mut()) {
                 None => continue,
-                // Keyboard offline on this link: BatteryHub lists it as disconnected (hidden).
-                Some(Status::Offline) => break,
+                // Keyboard offline on this link: try the other link, else it is listed off.
+                Some(Status::Offline) => {
+                    answered_offline = true;
+                    break;
+                }
                 Some(Status::Online(pct)) => {
                     let via = if is_cable(pid) { CABLE } else { RECEIVER };
                     let mut d = Device::new(
@@ -133,6 +137,16 @@ pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
                 }
             }
         }
+    }
+    if answered_offline {
+        // BatteryHub's `connected = false`: the keyboard is switched off or out of range.
+        let name = known_model(cable_pid).unwrap_or("Wireless keyboard");
+        return vec![Device::switched_off(
+            "semico:1A2C",
+            name,
+            Kind::Keyboard,
+            RECEIVER,
+        )];
     }
     Vec::new()
 }
@@ -228,9 +242,27 @@ mod tests {
         );
         assert_eq!(out[0].via, CABLE);
 
-        // Offline with no cable answering: nothing listed, no invented level.
+        // Offline with no cable answering: listed switched off, with no invented level.
         let s = by_path(vec![("dongle", vec![reply(0, 0)])]);
-        assert!(poll_with(&[collection(DONGLE, "dongle")], &mut s.clone()).is_empty());
+        let out = poll_with(&[collection(DONGLE, "dongle")], &mut s.clone());
+        assert_eq!(out.len(), 1);
+        let d = &out[0];
+        assert_eq!(
+            (d.key.as_str(), d.off, d.percent),
+            ("semico:1A2C", true, None)
+        );
+        assert_eq!(
+            (d.name.as_str(), d.kind, d.via.as_str()),
+            ("Wireless keyboard", Kind::Keyboard, RECEIVER)
+        );
+        // With the cable present but silent, the cable's model names it.
+        let s = by_path(vec![("dongle", vec![reply(0, 0)])]);
+        let colls = [collection(DONGLE, "dongle"), collection(X98_CABLE, "cable")];
+        let out = poll_with(&colls, &mut s.clone());
+        assert_eq!(
+            (out[0].name.as_str(), out[0].off),
+            ("Attack Shark X98", true)
+        );
     }
 
     #[test]

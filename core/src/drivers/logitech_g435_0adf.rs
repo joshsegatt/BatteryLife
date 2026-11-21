@@ -141,16 +141,17 @@ pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let Some(mut io) = found.first().and_then(|c| hid.open(c)) else {
         return Vec::new();
     };
-    // Dongle present but no reply: the headset is off or out of range.
-    let Some(mv) = read_millivolts(io.as_mut()) else {
-        return Vec::new();
-    };
     let mut d = Device::new(
         "g435:0ADF",
         "Logitech G435",
         Kind::Headset,
         "2.4 GHz receiver",
     );
+    // Dongle present but no reply: the headset is off or out of range.
+    let Some(mv) = read_millivolts(io.as_mut()) else {
+        d.off = true;
+        return vec![d];
+    };
     d.millivolts = Some(mv);
     d.percent = Some(percent(i32::from(mv)));
     vec![d]
@@ -194,6 +195,20 @@ mod tests {
         reply[19] = 0x00;
         assert_eq!(parse_millivolts(&reply), None);
         assert_eq!(parse_millivolts(&[0u8; 64]), None);
+    }
+
+    #[test]
+    fn silent_dongle_lists_the_headset_switched_off() {
+        use crate::drivers::hid::fake::Fake;
+        let c = Coll::new(VID, PID, 0xFF00, 0x0001, 65, 65);
+        // The session never opens (84 01 not sent): no reply, the headset is off.
+        let mut f = Fake::new();
+        f.s().refuse_send = true;
+        let out = poll_colls(std::slice::from_ref(&c), &mut f);
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, "g435:0ADF");
+        // No dongle collection: nothing.
+        assert!(poll_colls(&[], &mut Fake::new()).is_empty());
     }
 
     #[test]

@@ -291,18 +291,23 @@ pub fn physical_key(path: &str) -> String {
 pub enum Outcome {
     /// Nothing usable: try the next collection.
     NoAnswer,
-    /// The receiver answered but its device is off or out of range: nothing is listed (BatteryHub's
-    /// `connected = false`), and no other collection of that product is asked.
-    Off,
+    /// The receiver answered but its device is off or out of range (BatteryHub's
+    /// `connected = false`): the device as it is listed when on, which `settle` marks `off` so it is
+    /// hidden at once; no other collection of that product is asked.
+    Off(Device),
     Found(Device),
 }
 
 impl Outcome {
-    /// Adds a found device to `out`; true when the product is handled (found or off).
+    /// Adds the device to `out` (marked `off` for `Off`); true when the product is handled.
     pub fn settle(self, out: &mut Vec<Device>) -> bool {
         match self {
             Outcome::NoAnswer => false,
-            Outcome::Off => true,
+            Outcome::Off(mut d) => {
+                d.off = true;
+                out.push(d);
+                true
+            }
             Outcome::Found(d) => {
                 out.push(d);
                 true

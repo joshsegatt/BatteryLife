@@ -52,15 +52,15 @@ fn cloud3(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let Some(r) = q(0x82) else {
         return Outcome::NoAnswer;
     };
-    if r[2] == 0 {
-        return Outcome::Off;
-    }
     let name = if matches!(c.pid, 0x069F | 0x0995) {
         "HyperX Cloud II Core Wireless"
     } else {
         "HyperX Cloud III Wireless"
     };
     let mut d = base(c.pid, name);
+    if r[2] == 0 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = q(0x8A) {
         d.charging = r[2] == 1;
     }
@@ -128,10 +128,10 @@ fn cloud_alpha(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let Some(r) = q(0x03) else {
         return Outcome::NoAnswer;
     };
-    if r[3] == 0x01 {
-        return Outcome::Off;
-    }
     let mut d = base(c.pid, "HyperX Cloud Alpha Wireless");
+    if r[3] == 0x01 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = q(0x0C) {
         d.charging = r[3] == 0x01;
     }
@@ -153,10 +153,10 @@ fn cloud_alpha2(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let Some(r) = alpha2_query(io, 0x52, 0x01) else {
         return Outcome::NoAnswer;
     };
-    if r[2] == 0 {
-        return Outcome::Off;
-    }
     let mut d = base(c.pid, "HyperX Cloud Alpha 2 Wireless");
+    if r[2] == 0 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = alpha2_query(io, 0x50, 0x02).filter(|r| r[2] <= 100) {
         d.percent = Some(r[2]);
         d.charging = r[3] == 0x01;
@@ -192,13 +192,6 @@ fn haste(io: &mut dyn Dev, c: &Coll, st: &mut State) -> Outcome {
         });
     }
     st.haste_polled = true;
-    if !linked {
-        return Outcome::Off;
-    }
-    let settled = st
-        .haste_link_up
-        .is_some_and(|t| now.duration_since(t) >= HASTE_SETTLE);
-
     let name = match c.pid {
         0x0AB5 => "HyperX Pulsefire Haste 2 Core Wireless",
         0x0DA0 => "HyperX Pulsefire Haste 2 Mini",
@@ -208,6 +201,13 @@ fn haste(io: &mut dyn Dev, c: &Coll, st: &mut State) -> Outcome {
     d.kind = Kind::Mouse;
     // An unsettled (or missing) reading stays unknown, so the last level is kept meanwhile.
     d.grace = Duration::from_secs(60);
+    if !linked {
+        return Outcome::Off(d);
+    }
+    let settled = st
+        .haste_link_up
+        .is_some_and(|t| now.duration_since(t) >= HASTE_SETTLE);
+
     if let Some(r) = battery.filter(|_| settled) {
         d.percent = Some(r[2]);
         d.charging = r[3] == 0x01 || r[3] == 0x02;
@@ -259,10 +259,10 @@ fn cloud3s(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let Some(r) = q(0x02) else {
         return Outcome::NoAnswer;
     };
-    if r[6] != 2 {
-        return Outcome::Off;
-    }
     let mut d = base(c.pid, "HyperX Cloud III S Wireless");
+    if r[6] != 2 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = q(0x06).filter(|r| r[6] <= 100) {
         d.percent = Some(r[6]);
     }
@@ -328,15 +328,15 @@ fn stinger_core(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
         (false, Some(r)) if ps && !fresh(&r) => r,
         _ => return Outcome::NoAnswer,
     };
-    if r[11] != 0x01 {
-        return Outcome::Off;
-    }
     let name = match c.pid {
         0x173F => "HyperX Cloud Core Wireless",
         0x0A8E => "HyperX Cloud Stinger Core Wireless DTS",
         _ => "HyperX Cloud Stinger Core Wireless",
     };
     let mut d = base(c.pid, name);
+    if r[11] != 0x01 {
+        return Outcome::Off(d);
+    }
     if let (true, Some(r)) = exchange(&STINGER_BATTERY, battery)
         && matches!(r[9], 0x03 | 0x05 | 0x06)
     {
@@ -762,15 +762,17 @@ mod tests {
     fn haste_link_down_then_settle_window() {
         let core = haste_coll(0x0AB5, 0xFF00);
         let mut st = State::default();
-        // Link down: nothing listed and no battery query sent.
+        // Link down: listed as switched off and no battery query sent.
         let f = dongle(Some(link(0)), battery(70, 0));
         let (out, _) = run(std::slice::from_ref(&core), &f, &mut st);
         assert_eq!(f.s().writes(), vec![ASK_LINK.to_vec()]);
-        assert!(out.is_empty());
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, "hyperx:0AB5");
         // Link up right after: the power-on reading stays unknown.
         let f = dongle(Some(link(1)), battery(40, 0));
         let (out, _) = run(std::slice::from_ref(&core), &f, &mut st);
-        assert_eq!((out.len(), out[0].percent), (1, None));
+        assert_eq!((out.len(), out[0].percent, out[0].off), (1, None, false));
+        assert_eq!(out[0].key, "hyperx:0AB5");
     }
 
     // ---- Stinger Core (tests/hyperx_stinger_driver_test.cpp) ----
@@ -839,16 +841,14 @@ mod tests {
         let out = run(std::slice::from_ref(&dts), &f, &mut State::default()).0;
         assert_eq!((out[0].charging, out[0].percent), (false, Some(100)));
 
-        // Headset off: nothing listed, no battery request.
+        // Headset off: listed as switched off under the same key, no battery request.
         let f = stinger(
             vec![stinger_link(false); 10],
             vec![stinger_battery(3, 3954)],
         );
-        assert!(
-            run(std::slice::from_ref(&dts), &f, &mut State::default())
-                .0
-                .is_empty()
-        );
+        let out = run(std::slice::from_ref(&dts), &f, &mut State::default()).0;
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, format!("hyperx:{:04X}", dts.pid));
         assert_eq!(f.s().features().len(), 1);
     }
 

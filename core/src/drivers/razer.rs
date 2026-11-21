@@ -193,9 +193,9 @@ fn kind(colls: &[Coll], vid: u16, pid: u16, name: &str) -> Kind {
 }
 
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
-    // (device, connected): an offline receiver is kept until a live reading of the same device
-    // (its cable) replaces it, then dropped; the tracker keeps the last level while it sleeps.
-    let mut found: Vec<(Device, bool)> = Vec::new();
+    // An offline receiver (device switched off or out of range) is listed as off, unless a live
+    // reading of the same device (its cable) replaces it.
+    let mut found: Vec<Device> = Vec::new();
     for (vid, pid) in products(colls) {
         for c in find(colls, vid, pid, |c| c.feat_len == 91) {
             let Some(mut d) = hid.open(c) else { continue };
@@ -230,7 +230,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             );
             // Keep the last reading briefly when Synapse prevents a valid reply.
             s.grace = Duration::from_secs(120);
-            let connected = ok.is_some();
+            s.off = ok.is_none();
             if let Some((tid, args)) = ok {
                 s.percent = Some(percent(args[1]));
                 if let Rz::Ok(ch) = command(hid, d.as_mut(), pid, tid, 0x07, 0x84) {
@@ -238,11 +238,11 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
                 }
             }
             // Cable + receiver can report the same device; keep a live reading over an offline one.
-            match found.iter_mut().find(|(o, _)| o.name == s.name) {
-                None => found.push((s, connected)),
-                Some((existing, was_connected)) => {
-                    if !*was_connected && connected {
-                        *was_connected = true;
+            match found.iter_mut().find(|o| o.name == s.name) {
+                None => found.push(s),
+                Some(existing) => {
+                    if existing.off && !s.off {
+                        existing.off = false;
                         existing.percent = s.percent;
                     }
                     existing.charging |= s.charging;
@@ -252,10 +252,6 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
         }
     }
     found
-        .into_iter()
-        .filter(|(_, connected)| *connected)
-        .map(|(d, _)| d)
-        .collect()
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
@@ -344,6 +340,7 @@ mod tests {
                     let out = poll_with(&mut mailbox(states), &colls);
                     assert_eq!(out.len(), 1);
                     let s = &out[0];
+                    assert!(!s.off);
                     assert_eq!(s.percent, Some(((raw as u32 * 100 + 127) / 255) as u8));
                     assert!(s.charging);
                     assert_eq!(s.key, "razer:02D5");
@@ -354,14 +351,18 @@ mod tests {
     }
 
     #[test]
-    fn all_offline_lists_nothing() {
+    fn all_offline_lists_one_switched_off_device() {
         let off = State {
             online: false,
             raw: 0,
             charging: false,
         };
         let states = HashMap::from([(0x02D5, off), (0x02D7, off)]);
-        assert!(poll_with(&mut mailbox(states), &[coll(0x02D5), coll(0x02D7)]).is_empty());
+        let out = poll_with(&mut mailbox(states), &[coll(0x02D5), coll(0x02D7)]);
+        assert_eq!(out.len(), 1);
+        // The same key the device has when it answers, with no level.
+        assert_eq!((out[0].key.as_str(), out[0].off), ("razer:02D5", true));
+        assert_eq!((out[0].percent, out[0].charging), (None, false));
     }
 
     #[test]

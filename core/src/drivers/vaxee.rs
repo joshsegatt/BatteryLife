@@ -3,8 +3,10 @@
 //! ~100 ms later GET_FEATURE 0E -> [0E][A5][command][..][01][value]. Only battery (0B, 0..20 steps of
 //! 5%) and charging (10) are read; never configuration writes.
 //!
-//! BatteryHub also ends the sleeping-device grace period at once when the USB device disappears;
-//! that needs a "disconnected" state the tracker does not have yet, so it is not ported.
+//! BatteryHub also ends the sleeping-device grace period at once when the USB device disappears
+//! (`gone.connected = false`, from the paths it read last). That is not ported: the registry does
+//! not run a driver none of whose devices is plugged in, and the protocol has no "mouse off" reply
+//! to report as `Device::off` while the receiver is present.
 //!
 //! Ported from BatteryHub (src/drivers/vaxee.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits

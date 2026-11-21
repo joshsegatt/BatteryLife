@@ -188,21 +188,29 @@ pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid, st: &mut State) -> Vec<Devi
             };
             set(&mut st.addresses, pid, address);
             reported = true;
+            let via = if address == DONGLE_HEADSET {
+                "Jabra Link dongle"
+            } else {
+                "USB cable"
+            };
             let Some(p) = battery else {
-                // Dongle present, headset off or out of range: not listed; the name is asked again
-                // when it is back, so a newly paired headset is picked up.
+                // Dongle present, headset off or out of range: listed switched off under the name
+                // it had; the name is asked again when it is back, so a newly paired headset is
+                // picked up.
+                let name = get(&st.names, pid).unwrap_or_else(|| "Jabra headset".into());
                 st.names.retain(|(q, _)| *q != pid);
+                out.push(Device::switched_off(
+                    format!("jabra:{pid:04X}"),
+                    name,
+                    Kind::Headset,
+                    via,
+                ));
                 break;
             };
             if get(&st.names, pid).is_none() {
                 let name = headset_name(io, st, address).unwrap_or_else(|| "Jabra headset".into());
                 set(&mut st.names, pid, name);
             }
-            let via = if address == DONGLE_HEADSET {
-                "Jabra Link dongle"
-            } else {
-                "USB cable"
-            };
             let name = get(&st.names, pid).unwrap_or_default();
             let mut d = Device::new(format!("jabra:{pid:04X}"), name, Kind::Headset, via);
             d.percent = (p[1] <= 100).then_some(p[1]);
@@ -370,9 +378,17 @@ mod tests {
         assert_eq!((out[0].percent, out[0].charging), (Some(60), false));
         assert_eq!(out[0].name, "Jabra Evolve2 65 Flex");
         assert_eq!(out[0].via, "Jabra Link dongle");
-        // Switched off: the dongle NAKs F3, nothing is listed.
+        let key = out[0].key.clone();
+        // Switched off: the dongle NAKs F3; listed switched off under the same key and name.
         let (out, _) = poll_with(link(), &[(0x04, peer(&[], 0xF3, ""))], "", &mut st);
-        assert!(out.is_empty());
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(
+            (out[0].key.as_str(), out[0].name.as_str()),
+            (key.as_str(), "Jabra Evolve2 65 Flex")
+        );
+        // The name is forgotten while off.
+        let (out, _) = poll_with(link(), &[(0x04, peer(&[], 0xF3, ""))], "", &mut st);
+        assert_eq!((out[0].off, out[0].name.as_str()), (true, "Jabra headset"));
     }
 
     #[test]

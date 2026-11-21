@@ -48,6 +48,11 @@ fn mouse(key: String, name: &str, via: &str) -> Device {
     Device::new(key, name, Kind::Mouse, via)
 }
 
+/// The receiver answers but its mouse is off or out of range (BatteryHub's `connected = false`).
+fn off(key: String, name: &str, via: &str) -> Device {
+    Device::switched_off(key, name, Kind::Mouse, via)
+}
+
 // ---- Motospeed X6 ------------------------------------------------------------------------------
 
 const MOTOSPEED_VID: u16 = 0x0BDA;
@@ -422,14 +427,14 @@ fn delux_valid(r: &[u8]) -> bool {
     r.len() >= 20 && r[0] == 0x0C && r[2] == 0x20
 }
 
-/// Returns (device if connected, handled) for one Delux product.
+/// The device of one Delux product (switched off when its receiver says so), None when unhandled.
 fn poll_delux(
     colls: &[Coll],
     io: &mut dyn Hid,
     seq: &mut u8,
     pid: u16,
     end: Instant,
-) -> Option<Option<Device>> {
+) -> Option<Device> {
     for c in find(colls, DELUX_VID, pid, |c| {
         c.page == 0xFF00 && c.usage == 1 && c.feat_len >= 33
     }) {
@@ -462,25 +467,22 @@ fn poll_delux(
         let Some(reading) = delux_parse(&r) else {
             continue;
         };
+        let via = if receiver {
+            "2.4 GHz receiver"
+        } else {
+            "USB cable"
+        };
         if !reading.connected {
-            return Some(None);
+            return Some(off("delux:m800".into(), "Delux M800 Pro", via));
         }
-        let mut s = mouse(
-            "delux:m800".into(),
-            "Delux M800 Pro",
-            if receiver {
-                "2.4 GHz receiver"
-            } else {
-                "USB cable"
-            },
-        );
+        let mut s = mouse("delux:m800".into(), "Delux M800 Pro", via);
         s.percent = reading.percent;
         s.charging = reading.charging;
         s.full = r[19] == 2;
         if receiver {
             s.grace = Duration::from_secs(1800);
         }
-        return Some(Some(s));
+        return Some(s);
     }
     None
 }
@@ -513,7 +515,7 @@ fn poll_aj179(
     vid: u16,
     pid: u16,
     end: Instant,
-) -> Option<Option<Device>> {
+) -> Option<Device> {
     for c in find(colls, vid, pid, |c| {
         c.iface == 2 && c.out_len == 33 && c.in_len == 33
     }) {
@@ -532,24 +534,22 @@ fn poll_aj179(
             continue;
         };
         let receiver = vid == AJAZZ_RECEIVER_VID;
+        let key = format!("ajazz:{}:{}", hex4(vid), hex4(pid));
+        let via = if receiver {
+            "2.4 GHz receiver"
+        } else {
+            "USB cable"
+        };
         if receiver && r[14] == 0 {
-            return Some(None); // the mouse behind the receiver is off
+            return Some(off(key, &aj179_name(&r), via)); // the mouse behind the receiver is off
         }
-        let mut s = mouse(
-            format!("ajazz:{}:{}", hex4(vid), hex4(pid)),
-            &aj179_name(&r),
-            if receiver {
-                "2.4 GHz receiver"
-            } else {
-                "USB cable"
-            },
-        );
+        let mut s = mouse(key, &aj179_name(&r), via);
         s.charging = r[12] != 0;
         s.percent = Some(r[13]);
         if receiver {
             s.grace = Duration::from_secs(1800);
         }
-        return Some(Some(s));
+        return Some(s);
     }
     None
 }
@@ -559,12 +559,7 @@ pub fn aj_series_parse(r: &[u8]) -> Option<u8> {
     (r.len() >= 4 && r[0] == 0x05 && r[1] == 0 && r[2] == 0 && r[3] <= 100).then(|| r[3])
 }
 
-fn poll_aj_series(
-    colls: &[Coll],
-    io: &mut dyn Hid,
-    pid: u16,
-    end: Instant,
-) -> Option<Option<Device>> {
+fn poll_aj_series(colls: &[Coll], io: &mut dyn Hid, pid: u16, end: Instant) -> Option<Device> {
     for c in find(colls, AJ_SERIES_VID, pid, |c| {
         c.page == 0xFFFF && c.usage == 0x02 && c.feat_len >= 65
     }) {
@@ -581,17 +576,15 @@ fn poll_aj_series(
         let Some(pct) = d.get_feature(0x05).and_then(|r| aj_series_parse(&r)) else {
             continue;
         };
+        let key = format!("ajazzaj:{}:{}", hex4(AJ_SERIES_VID), hex4(pid));
+        let name = c.product_or("AJAZZ mouse");
         if pct == 0 {
-            return Some(None);
+            return Some(off(key, &name, "2.4 GHz receiver")); // link up, mouse off
         }
-        let mut s = mouse(
-            format!("ajazzaj:{}:{}", hex4(AJ_SERIES_VID), hex4(pid)),
-            &c.product_or("AJAZZ mouse"),
-            "2.4 GHz receiver",
-        );
+        let mut s = mouse(key, &name, "2.4 GHz receiver");
         s.percent = Some(pct);
         s.grace = Duration::from_secs(1800);
-        return Some(Some(s));
+        return Some(s);
     }
     None
 }
@@ -600,7 +593,7 @@ fn aj139_reply(r: &[u8]) -> bool {
     r.len() > 9 && r[0] == 0xAA && r[1] == 0x30
 }
 
-fn poll_aj139(colls: &[Coll], io: &mut dyn Hid, vid: u16, end: Instant) -> Option<Option<Device>> {
+fn poll_aj139(colls: &[Coll], io: &mut dyn Hid, vid: u16, end: Instant) -> Option<Device> {
     for c in find(colls, vid, AJ139_PID, |c| {
         c.page == 0xFF01 && c.usage == 0x0010 && c.out_len >= 65 && c.in_len >= 65
     }) {
@@ -624,24 +617,22 @@ fn poll_aj139(colls: &[Coll], io: &mut dyn Hid, vid: u16, end: Instant) -> Optio
             continue;
         };
         let cable = vid == AJ139_CABLE_VID;
+        let key = format!("ajazz139:{}:{}", hex4(vid), hex4(AJ139_PID));
+        let via = if cable {
+            "USB cable"
+        } else {
+            "2.4 GHz receiver"
+        };
         if !cable && r[8] == 0 {
-            return Some(None); // the mouse is off or out of range
+            return Some(off(key, "AJAZZ wireless mouse", via)); // the mouse is off or out of range
         }
-        let mut s = mouse(
-            format!("ajazz139:{}:{}", hex4(vid), hex4(AJ139_PID)),
-            "AJAZZ wireless mouse",
-            if cable {
-                "USB cable"
-            } else {
-                "2.4 GHz receiver"
-            },
-        );
+        let mut s = mouse(key, "AJAZZ wireless mouse", via);
         s.charging = r[9] != 0;
         s.percent = Some(r[8]);
         if !cable {
             s.grace = Duration::from_secs(1800);
         }
-        return Some(Some(s));
+        return Some(s);
     }
     None
 }
@@ -657,10 +648,10 @@ fn ajazz_with(colls: &[Coll], io: &mut dyn Hid, seq: &mut u8) -> Vec<Device> {
         }
         if let Some(found) = poll_delux(colls, io, seq, pid, end) {
             handled.push((DELUX_VID, pid));
-            if pid == DELUX_CABLE && found.is_some() {
+            if pid == DELUX_CABLE && !found.off {
                 handled.push((DELUX_VID, DELUX_RECEIVER));
             }
-            out.extend(found);
+            out.push(found);
         }
     }
     for vid in [AJAZZ_RECEIVER_VID, DELUX_VID] {
@@ -669,15 +660,15 @@ fn ajazz_with(colls: &[Coll], io: &mut dyn Hid, seq: &mut u8) -> Vec<Device> {
                 && let Some(found) = poll_aj179(colls, io, vid, pid, end)
             {
                 handled.push((vid, pid));
-                out.extend(found);
+                out.push(found);
             }
         }
     }
     for pid in pids(colls, AJ_SERIES_VID) {
-        out.extend(poll_aj_series(colls, io, pid, end).flatten());
+        out.extend(poll_aj_series(colls, io, pid, end));
     }
     for vid in [AJ139_DONGLE_VID, AJ139_CABLE_VID] {
-        out.extend(poll_aj139(colls, io, vid, end).flatten());
+        out.extend(poll_aj139(colls, io, vid, end));
     }
     out
 }
@@ -716,27 +707,28 @@ pub fn w1_model(r: &[u8]) -> Option<u8> {
         .then(|| if r[3] == 18 || r[3] == 20 { r[3] } else { 0 })
 }
 
-fn pixart_device(pid: u16, key: &str, name: &str, pct: u8, charging: bool) -> Option<Device> {
+/// A PixArt mouse's reading; None means no reading at all (BatteryHub lists that as off too).
+fn pixart_device(pid: u16, key: &str, name: &str, reading: Option<(u8, bool)>) -> Device {
     let cable = pid == 0x622C;
-    // 0 from the dongle: the mouse is off.
-    if !(cable || pct > 0 || charging) {
-        return None;
-    }
-    let mut s = mouse(
+    let (key, via) = (
         format!("{key}:{}", hex4(pid)),
-        name,
         if cable {
             "USB cable"
         } else {
             "2.4 GHz receiver"
         },
     );
+    // 0 from the dongle: the mouse is off.
+    let Some((pct, charging)) = reading.filter(|(p, ch)| cable || *p > 0 || *ch) else {
+        return off(key, name, via);
+    };
+    let mut s = mouse(key, name, via);
     s.percent = Some(pct);
     s.charging = charging;
     if !cable {
         s.grace = Duration::from_secs(1800);
     }
-    Some(s)
+    s
 }
 
 /// The W1's battery: per-button reads (86) as the web driver does them, while listening for the
@@ -807,14 +799,14 @@ fn w1_read(
     got.map(|r| (r[1] & 0x7F, r[1] & 0x80 != 0))
 }
 
-/// Some(device or hidden) when the product is a W1, None to leave it to the Incott query.
+/// Some(device, maybe switched off) for a W1; None leaves the product to the Incott query.
 fn poll_w1(
     colls: &[Coll],
     io: &mut dyn Hid,
     pid: u16,
     known: &mut u8,
     end: Instant,
-) -> Option<Option<Device>> {
+) -> Option<Device> {
     let mut cs = find(colls, PIXART_VID, pid, |c| {
         c.page == 0xFF05 && c.feat_len >= 9
     });
@@ -862,9 +854,10 @@ fn poll_w1(
     } else {
         "Wraith W1"
     };
-    // Handled even when asleep, so the Incott query never goes to a W1.
+    // Handled even without a reading, so the Incott query never goes to a W1; BatteryHub lists a
+    // W1 that gives no status as not connected.
     let reading = open.and_then(|mut d| w1_read(colls, io, d.as_mut(), pid, end));
-    Some(reading.and_then(|(pct, charging)| pixart_device(pid, "wraithw1", name, pct, charging)))
+    Some(pixart_device(pid, "wraithw1", name, reading))
 }
 
 fn poll_incott(colls: &[Coll], io: &mut dyn Hid, pid: u16, end: Instant) -> Option<Device> {
@@ -889,11 +882,11 @@ fn poll_incott(colls: &[Coll], io: &mut dyn Hid, pid: u16, end: Instant) -> Opti
                 break;
             }
         }
-        let Some((pct, charging)) = reading else {
+        if reading.is_none() {
             continue;
-        };
+        }
         // The ids are shared by the G23 V2 and the G24.
-        return pixart_device(pid, "incott", "Incott mouse", pct, charging);
+        return Some(pixart_device(pid, "incott", "Incott mouse", reading));
     }
     None
 }
@@ -903,7 +896,7 @@ fn pixart_with(colls: &[Coll], io: &mut dyn Hid, known: &mut [u8; 2]) -> Vec<Dev
     let mut out = Vec::new();
     for (i, pid) in PIXART_PIDS.into_iter().enumerate() {
         match poll_w1(colls, io, pid, &mut known[i], end) {
-            Some(found) => out.extend(found),
+            Some(found) => out.push(found),
             None => out.extend(poll_incott(colls, io, pid, end)),
         }
     }
@@ -1090,7 +1083,10 @@ mod tests {
             &mut f,
             &mut 0,
         );
-        assert!(out.is_empty(), "receiver without its mouse");
+        // Receiver without its mouse: switched off, same key.
+        assert_eq!(out.len(), 1);
+        assert!(out[0].off && out[0].percent.is_none());
+        assert_eq!(out[0].key, "ajazz:249A:1234");
     }
 
     #[test]
@@ -1224,5 +1220,48 @@ mod tests {
             ("Incott mouse", Some(73))
         );
         assert_eq!(known, [0, 0]);
+    }
+
+    #[test]
+    fn mice_reported_off_by_their_dongle_are_listed_off() {
+        // Delux M800 receiver: no link byte and no level.
+        let mut f = Fake::with(|s, fc, op| {
+            if op.sent().is_some() {
+                let mut r = vec![0u8; 33];
+                r[0] = 0x0C;
+                r[2] = 0x20;
+                s.push_feature("", r);
+            }
+            fake::queued(s, fc, op)
+        });
+        f.s().pad_features = true;
+        let out = ajazz_with(
+            &[coll(DELUX_VID, DELUX_RECEIVER, 0, 0xFF00, 1, 0, 0, 33)],
+            &mut f,
+            &mut 0,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].key.as_str(), out[0].off), ("delux:m800", true));
+        // Incott dongle answering 0 % while not charging.
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                let r = if q[1] == 0x8F {
+                    vec![9, 0x8F, 0, 2, 0, 0, 0, 0, 0]
+                } else {
+                    vec![9, 0x89, 0, 0x31, 0, 0, 0, 0, 0]
+                };
+                s.push_feature("", r);
+            }
+            fake::queued(s, fc, op)
+        });
+        f.s().pad_features = true;
+        let out = pixart_with(
+            &[coll(PIXART_VID, 0x522C, 1, 0xFF05, 1, 9, 0, 9)],
+            &mut f,
+            &mut [0, 0],
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].key.as_str(), out[0].off), ("incott:522C", true));
+        assert!(out[0].percent.is_none());
     }
 }

@@ -178,7 +178,7 @@ fn poll_legacy(c: &Coll, name: &str, io: Option<&mut dyn Dev>, st: &mut State) -
         && !docked
         && s & 0x02 == 0
     {
-        return Outcome::Off;
+        return Outcome::Off(d);
     }
     let mut battery = query_legacy(io, st, c.pid, 0x7C, &[]);
     if battery == QResult::Error
@@ -199,7 +199,7 @@ fn poll_legacy(c: &Coll, name: &str, io: Option<&mut dyn Dev>, st: &mut State) -
             Outcome::Found(d)
         }
         // Base answered without a status: headset off or out of range.
-        QResult::Error if status.is_none() => Outcome::Off,
+        QResult::Error if status.is_none() => Outcome::Off(d),
         _ if status.is_some() => Outcome::Found(d),
         _ => Outcome::NoAnswer,
     }
@@ -432,19 +432,22 @@ mod tests {
             &mut State::default(),
         );
         assert_eq!((out[0].percent, out[0].charging), (Some(5), true));
-        // Headset off, or 0x7C refused without a status: nothing listed.
+        // Headset off, or 0x7C refused without a status: listed as switched off, same key.
         let (out, _, _) = run(
             &[legacy(0x001D)],
             vec![vec![2, 2, 1, 0]],
             &mut State::default(),
         );
-        assert!(out.is_empty());
+        assert_eq!(out.len(), 1);
+        assert!(out[0].off && out[0].percent.is_none());
+        assert_eq!(out[0].key, "astro:001D");
         let (out, _, _) = run(
             &[legacy(0x0026)],
             vec![vec![], vec![], vec![2, 1, 0, 0]],
             &mut State::default(),
         );
-        assert!(out.is_empty());
+        assert_eq!((out.len(), out[0].off), (1, true));
+        assert_eq!(out[0].key, "astro:0026");
         // Nothing answers: not listed.
         assert!(
             run(&[legacy(0x002C)], vec![], &mut State::default())

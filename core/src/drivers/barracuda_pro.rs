@@ -105,16 +105,17 @@ pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
         drain(io);
         io.write(&remote_frame(false));
     }
-    // No level: receiver present, headset off or out of range.
-    let Some(level) = level.filter(|l| *l <= 100) else {
-        return Vec::new();
-    };
     let mut d = Device::new(
         "barracuda:053A",
         "Razer Barracuda Pro",
         Kind::Headset,
         "2.4 GHz receiver",
     );
+    // No level: receiver present, headset off or out of range.
+    let Some(level) = level.filter(|l| *l <= 100) else {
+        d.off = true;
+        return vec![d];
+    };
     d.percent = Some(level);
     d.charging = charging.is_some_and(|c| c > 0);
     vec![d]
@@ -170,9 +171,11 @@ mod tests {
     }
 
     #[test]
-    fn headset_off_lists_nothing() {
+    fn headset_off_is_listed_switched_off() {
         let f = Fake::new();
         let c = Coll::new(VID, PID, 0xFF00, 1, 64, 64);
-        assert!(poll_colls(&[c], &mut f.clone()).is_empty());
+        let out = poll_colls(&[c], &mut f.clone());
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, "barracuda:053A");
     }
 }

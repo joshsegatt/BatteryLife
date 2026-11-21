@@ -79,6 +79,9 @@ fn query(port: &mut dyn Dev, cable: bool) -> Option<Status> {
     None
 }
 
+const KEY: &str = "machenike:l7";
+const NAME: &str = "Machenike L7 Arctic / L7 Mix";
+
 pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     // A live cable reading takes precedence over the receiver's cached / disconnected state.
     for pid in [CABLE_PID, RECEIVER_PID] {
@@ -92,20 +95,17 @@ pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
         let Some(mut port) = hid.open(c) else {
             continue;
         };
-        let Some((percent, charging)) = (match query(port.as_mut(), cable) {
-            Some(Status::Online(p, ch)) => Some((p, ch)),
-            _ => None, // no reply, or the receiver without its mouse: BatteryHub hides it
-        }) else {
-            continue;
-        };
         let via = if cable { CABLE } else { RECEIVER };
+        let (percent, charging) = match query(port.as_mut(), cable) {
+            Some(Status::Online(p, ch)) => (p, ch),
+            // The receiver without its mouse: BatteryHub lists it disconnected (hidden at once).
+            Some(Status::Offline) => {
+                return vec![Device::switched_off(KEY, NAME, Kind::Mouse, via)];
+            }
+            None => continue,
+        };
         // Same entry when switching between cable and receiver.
-        let mut d = Device::new(
-            "machenike:l7",
-            "Machenike L7 Arctic / L7 Mix",
-            Kind::Mouse,
-            via,
-        );
+        let mut d = Device::new(KEY, NAME, Kind::Mouse, via);
         d.percent = Some(percent);
         d.charging = charging;
         if !cable {
@@ -193,14 +193,27 @@ mod tests {
     }
 
     #[test]
-    fn zero_and_full_are_levels_and_offline_is_hidden() {
+    fn zero_and_full_are_levels_and_offline_is_switched_off() {
         for pct in [0u8, 100] {
             let mut r = WIRELESS;
             r[11] = pct;
             assert_eq!(decode(&r, false), Some(Status::Online(pct, false)));
         }
         let s = device(vec![OFFLINE.to_vec()]);
-        assert!(poll_with(&[collection(false)], &mut s.clone()).is_empty());
+        let out = poll_with(&[collection(false)], &mut s.clone());
+        assert_eq!(out.len(), 1);
+        let d = &out[0];
+        assert_eq!(
+            (d.key.as_str(), d.off, d.percent, d.via.as_str()),
+            ("machenike:l7", true, None, RECEIVER)
+        );
+        // A live cable reading still wins over the receiver's offline state.
+        let s = device(vec![CABLED.to_vec(), OFFLINE.to_vec()]);
+        let out = poll_with(&[collection(true), collection(false)], &mut s.clone());
+        assert_eq!(
+            (out.len(), out[0].off, out[0].via.as_str()),
+            (1, false, CABLE)
+        );
     }
 
     #[test]

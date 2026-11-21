@@ -110,7 +110,7 @@ fn keyboard_name(product: &str) -> String {
     }
 }
 
-/// Polls one dongle product; None when it is absent, silent, or reports no keyboard connected.
+/// Polls one dongle product; None when it is absent or silent, off when no keyboard is connected.
 pub fn poll_product(colls: &[Coll], hid: &mut dyn Hid, vid: u16, pid: u16) -> Option<Device> {
     let &(_, _, iface) = DONGLES.iter().find(|d| d.0 == vid && d.1 == pid)?;
     for c in colls.iter().filter(|c| {
@@ -128,17 +128,14 @@ pub fn poll_product(colls: &[Coll], hid: &mut dyn Hid, vid: u16, pid: u16) -> Op
         let Some(level) = query_level(port.as_mut()).or_else(|| query_level(port.as_mut())) else {
             continue;
         };
-        // 0 (or out of range): keyboard off, out of range or in another mode. BatteryHub hides the
-        // entry; here the tracker keeps the last level for the grace period.
+        let key = format!("sonix:{vid:04X}:{pid:04X}");
+        let name = keyboard_name(&c.product);
+        // 0 (or out of range): keyboard off, out of range or in another mode. BatteryHub lists it
+        // disconnected, which hides it at once.
         if !(1..=100).contains(&level) {
-            return None;
+            return Some(Device::switched_off(key, name, Kind::Keyboard, RECEIVER));
         }
-        let mut d = Device::new(
-            format!("sonix:{vid:04X}:{pid:04X}"),
-            keyboard_name(&c.product),
-            Kind::Keyboard,
-            RECEIVER,
-        );
+        let mut d = Device::new(key, name, Kind::Keyboard, RECEIVER);
         d.percent = Some(level);
         d.grace = RECEIVER_GRACE; // a sleeping keyboard stops answering
         return Some(d);
@@ -208,10 +205,11 @@ mod tests {
                 vec![vec![vec![0x20, 1, 0, level]]],
             );
             let connected = (1..=100).contains(&level);
-            assert_eq!(out.len(), usize::from(connected));
-            if connected {
-                assert_eq!(out[0].percent, Some(level));
-            }
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].key, "sonix:342D:E479");
+            assert_eq!(out[0].name, "Keyboard");
+            assert_eq!(out[0].off, !connected);
+            assert_eq!(out[0].percent, connected.then_some(level));
         }
     }
 

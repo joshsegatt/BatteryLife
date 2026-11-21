@@ -34,20 +34,23 @@ pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
             c.page == 0xFF00 && c.usage == 0x0001 && c.out_len >= 4 && c.in_len >= 24
         }) {
             let Some(mut io) = hid.open(c) else { continue };
+            let via = if cable { "USB cable" } else { "2.4 GHz dongle" };
+            // Same entry on the dongle and on the cable.
+            let mut d = Device::new("fractal:scape", "Fractal Scape", Kind::Headset, via);
             if !cable {
                 let Some(r) = get_state(io.as_mut(), TYPE_DONGLE) else {
                     continue;
                 };
                 if r[4] != 1 {
-                    break; // dongle answers, headset off, out of range or on its stand
+                    // Dongle answers, headset off, out of range or on its stand.
+                    d.off = true;
+                    out.push(d);
+                    break;
                 }
             }
             let Some(r) = get_state(io.as_mut(), TYPE_HEADSET).filter(|r| r[15] <= 100) else {
                 continue;
             };
-            let via = if cable { "USB cable" } else { "2.4 GHz dongle" };
-            // Same entry on the dongle and on the cable.
-            let mut d = Device::new("fractal:scape", "Fractal Scape", Kind::Headset, via);
             d.percent = Some(r[15]);
             d.charging = r[23] == 1;
             out.push(d);
@@ -102,7 +105,10 @@ mod tests {
         let (out, f) = run(0x2001, 0);
         assert_eq!((out[0].percent, out[0].charging), (Some(68), true));
         assert_eq!(f.s().writes(), vec![vec![2, 0xF1, 0x21]]);
-        let (out, _) = run(0x0001, 0);
-        assert!(out.is_empty());
+        // Dongle without its headset: switched off, same entry as the live reading.
+        let (out, f) = run(0x0001, 0);
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, "fractal:scape");
+        assert_eq!(f.s().writes(), vec![vec![2, 0x11, 0x21]]);
     }
 }
