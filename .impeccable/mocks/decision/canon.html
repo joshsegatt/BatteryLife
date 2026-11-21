@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Padrão Windows 11</title>
+<style>
+:root{--bg:#202020;--card:#2b2b2b;--ink:#fff;--mute:#c5c5c5;--acc:#60cdff;--crit:#ff99a4}
+*{box-sizing:border-box;margin:0}
+body{width:440px;height:780px;overflow:hidden;background:linear-gradient(160deg,#1d3a5c,#0e1a2b 60%,#0a0f18);font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--ink);position:relative}
+.flyout{position:absolute;left:24px;right:24px;bottom:60px;background:rgba(32,32,32,.94);border-radius:8px;outline:1px solid #3a3a3a;box-shadow:0 16px 40px rgba(0,0,0,.5);padding:14px}
+h1{font-size:14px;font-weight:600;margin:2px 4px 12px}
+.item{display:grid;grid-template-columns:32px 1fr auto;gap:12px;align-items:center;background:var(--card);border-radius:6px;padding:12px;margin-bottom:4px}
+.item .ic{width:32px;height:32px;display:grid;place-items:center}
+.item b{display:block;font-size:13px;font-weight:600}
+.item span{font-size:12px;color:var(--mute)}
+.item .v{text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+.prog{grid-column:2/4;height:3px;background:#3d3d3d;border-radius:2px}
+.prog i{display:block;height:100%;border-radius:2px;background:var(--acc)}
+.item.crit .v,.item.crit span.s{color:var(--crit)}
+.item.crit .prog i{background:var(--crit)}
+.item.sleep{opacity:.6}
+.foot{display:flex;justify-content:space-between;margin:12px 4px 2px;font-size:12px;color:var(--mute)}
+.bar{position:absolute;left:0;right:0;bottom:0;height:48px;background:#1c1c1c;border-top:1px solid #2b2b2b;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding-right:16px;font-size:12px;color:#eee;font-variant-numeric:tabular-nums}
+.clock{text-align:right;line-height:1.25;color:#ddd;margin-left:6px}
+</style></head><body>
+<div class="flyout">
+  <h1>Bateria dos aparelhos</h1>
+  <div class="item crit"><div class="ic"><svg width="22" height="20" viewBox="0 0 22 20"><path d="M3 14 V10 A8 8 0 0 1 19 10 V14" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="1" y="12" width="5" height="7" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/><rect x="16" y="12" width="5" height="7" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/></svg></div><div><b>HyperX Cloud III Wireless</b><span class="s">Bateria fraca · 2 h 10 min</span></div><div class="v">18%</div><div class="prog"><i style="width:18%"></i></div></div>
+  <div class="item"><div class="ic"><svg width="12" height="20" viewBox="0 0 12 20"><rect x="1" y="1" width="10" height="18" rx="5" fill="none" stroke="#fff" stroke-width="1.5"/></svg></div><div><b>G Pro X Superlight 2</b><span>Mouse · 61 h</span></div><div class="v">93%</div><div class="prog"><i style="width:93%"></i></div></div>
+  <div class="item"><div class="ic"><svg width="22" height="10" viewBox="0 0 22 10"><rect x="1" y="1" width="20" height="8" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/></svg></div><div><b>Keychron K2 HE</b><span>Carregando · cheio em 48 min</span></div><div class="v">64%</div><div class="prog"><i style="width:64%"></i></div></div>
+  <div class="item"><div class="ic"><svg width="12" height="20" viewBox="0 0 12 20"><rect x="1" y="1" width="10" height="18" rx="2" fill="none" stroke="#fff" stroke-width="1.5"/></svg></div><div><b>Galaxy S24</b><span>Celular · 19 h</span></div><div class="v">84%</div><div class="prog"><i style="width:84%"></i></div></div>
+  <div class="item sleep"><div class="ic"><svg width="22" height="14" viewBox="0 0 22 14"><path d="M4 2 H18 A4 4 0 0 1 21 7 L19 13 L14 10 H8 L3 13 L1 7 A4 4 0 0 1 4 2Z" fill="none" stroke="#fff" stroke-width="1.5"/></svg></div><div><b>Xbox Wireless Controller</b><span>Dormindo · há 2 h</span></div><div class="v">71%</div><div class="prog"><i style="width:71%"></i></div></div>
+  <div class="foot"><span>Alerta em 15%</span><span>Configurações</span></div>
+</div>
+<div class="bar"><span>Headset 18%</span><span>Mouse 93%</span><div class="clock">21:47<br>21/11/2026</div></div>
+</body></html>

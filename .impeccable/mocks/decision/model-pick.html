@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Transmissão de Esports</title>
+<style>
+:root{--ground:#0b0d14;--plate:#161a26;--ink:#fff;--mute:#9aa3b8;--blue:#3d7bff;--red:#ff4655;--gold:#ffd23f}
+*{box-sizing:border-box;margin:0}
+body{width:440px;height:780px;overflow:hidden;background:linear-gradient(180deg,#141826,#07080c);font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--ink);position:relative}
+.flyout{position:absolute;left:24px;right:24px;bottom:60px;background:var(--ground);border-radius:8px;overflow:hidden;box-shadow:0 18px 44px rgba(0,0,0,.6);outline:1px solid #23293a}
+header{display:flex;align-items:stretch;height:44px}
+header .t{background:var(--blue);padding:0 18px 0 16px;display:flex;align-items:center;font-weight:700;font-size:14px;letter-spacing:.04em;text-transform:uppercase;clip-path:polygon(0 0,100% 0,92% 100%,0 100%)}
+header .s{display:flex;align-items:center;padding-left:10px;font-size:12px;color:var(--mute)}
+.card{position:relative;margin:8px 10px;background:var(--plate);display:grid;grid-template-columns:6px 1fr auto;align-items:center;min-height:64px;clip-path:polygon(0 0,100% 0,100% 100%,14px 100%,0 calc(100% - 14px))}
+.card .stripe{height:100%}
+.card .who{padding:10px 14px}
+.card .who b{display:block;font-size:14px}
+.card .who span{font-size:11.5px;color:var(--mute)}
+.card .hp{padding-right:16px;text-align:right}
+.card .hp b{font:700 26px/1 "Segoe UI Variable Display","Segoe UI",sans-serif;font-variant-numeric:tabular-nums}
+.card .hp span{display:block;font-size:11px;color:var(--mute);margin-top:3px}
+.card .life{position:absolute;left:20px;right:16px;bottom:7px;height:4px;background:#262c3d}
+.card .life i{display:block;height:100%}
+.card.crit{background:linear-gradient(90deg,rgba(255,70,85,.22),var(--plate) 60%)}
+.card.crit .hp b{color:var(--red)}
+.card.sleep{opacity:.5}
+footer{display:flex;justify-content:space-between;padding:12px 16px;font-size:12px;color:var(--mute);border-top:1px solid #1f2433}
+.bar{position:absolute;left:0;right:0;bottom:0;height:48px;background:#1c1c1c;border-top:1px solid #2b2b2b;display:flex;align-items:center;justify-content:flex-end;gap:10px;padding-right:16px;font-size:12px}
+.pill{display:flex;align-items:center;gap:6px;padding:3px 8px;background:#262a36;font-weight:700;font-variant-numeric:tabular-nums;clip-path:polygon(6px 0,100% 0,calc(100% - 6px) 100%,0 100%)}
+.pill.crit{background:var(--red)}
+.clock{text-align:right;line-height:1.25;color:#ddd;margin-left:6px}
+</style></head><body>
+<div class="flyout">
+  <header><div class="t">Elenco</div><div class="s">5 aparelhos · ao vivo</div></header>
+  <div class="card crit"><div class="stripe" style="background:#ff4655"></div>
+    <div class="who"><b>HyperX Cloud III Wireless</b><span>Headset · 2,4 GHz · saúde 87%</span></div>
+    <div class="hp"><b>18%</b><span>2 h 10 min</span></div>
+    <div class="life"><i style="width:18%;background:#ff4655"></i></div></div>
+  <div class="card"><div class="stripe" style="background:#00b8fc"></div>
+    <div class="who"><b>G Pro X Superlight 2</b><span>Mouse · Lightspeed</span></div>
+    <div class="hp"><b>93%</b><span>61 h</span></div>
+    <div class="life"><i style="width:93%;background:#fff"></i></div></div>
+  <div class="card"><div class="stripe" style="background:#ffd23f"></div>
+    <div class="who"><b>Keychron K2 HE</b><span>Teclado · carregando</span></div>
+    <div class="hp"><b style="color:#ffd23f">64%</b><span>cheio em 48 min</span></div>
+    <div class="life"><i style="width:64%;background:#ffd23f"></i></div></div>
+  <div class="card"><div class="stripe" style="background:#1428a0"></div>
+    <div class="who"><b>Galaxy S24</b><span>Celular · Phone Link</span></div>
+    <div class="hp"><b>84%</b><span>19 h</span></div>
+    <div class="life"><i style="width:84%;background:#fff"></i></div></div>
+  <div class="card sleep"><div class="stripe" style="background:#107c10"></div>
+    <div class="who"><b>Xbox Wireless Controller</b><span>Controle · dormindo</span></div>
+    <div class="hp"><b>71%</b><span>há 2 h</span></div>
+    <div class="life"><i style="width:71%;background:#9aa3b8"></i></div></div>
+  <footer><span>Alerta em 15%</span><span>Histórico · Configurações</span></footer>
+</div>
+<div class="bar">
+  <div class="pill crit">HS 18%</div>
+  <div class="pill">MS 93%</div>
+  <div class="clock">21:47<br>21/11/2026</div>
+</div>
+</body></html>

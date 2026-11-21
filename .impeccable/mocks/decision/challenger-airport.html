@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Placa de Aeroporto</title>
+<style>
+:root{--y:#ffd200;--k:#111;--w:#fff;--g:#2a2a2a;--m:#a8a8a8}
+*{box-sizing:border-box;margin:0}
+body{width:440px;height:780px;overflow:hidden;background:#0c0c0c;font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--w);position:relative}
+.flyout{position:absolute;left:24px;right:24px;bottom:60px;background:var(--k);border-radius:8px;overflow:hidden;box-shadow:0 18px 44px rgba(0,0,0,.6);outline:1px solid #2a2a2a}
+.band{background:var(--y);color:var(--k);padding:18px 18px 20px;display:grid;grid-template-columns:56px 1fr;gap:14px;align-items:center}
+.pict{width:56px;height:56px;background:var(--k);display:grid;place-items:center}
+.band .msg{font-size:15px;font-weight:600;line-height:1.25}
+.band .big{font:700 40px/1 "Segoe UI Variable Display","Segoe UI",sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin-top:6px}
+.band .sub{font-size:12px;margin-top:6px}
+.row{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--g)}
+.row .ic{width:36px;height:36px;background:#1f1f1f;display:grid;place-items:center}
+.row b{display:block;font-size:14px;font-weight:600}
+.row span{font-size:12px;color:var(--m)}
+.row .v{text-align:right;font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.row .v span{display:block;font-size:11.5px;font-weight:400}
+.row.sleep{opacity:.5}
+footer{display:flex;justify-content:space-between;padding:12px 18px;font-size:12px;color:var(--m)}
+.bar{position:absolute;left:0;right:0;bottom:0;height:48px;background:#1c1c1c;border-top:1px solid #2b2b2b;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding-right:16px;font-size:12px}
+.tag{background:var(--y);color:var(--k);font-weight:700;padding:3px 7px;font-variant-numeric:tabular-nums}
+.plain{color:#eee;font-variant-numeric:tabular-nums}
+.clock{text-align:right;line-height:1.25;color:#ddd;margin-left:6px}
+</style></head><body>
+<div class="flyout">
+  <div class="band">
+    <div class="pict"><svg width="34" height="30" viewBox="0 0 34 30"><path d="M5 20 V15 A12 12 0 0 1 29 15 V20" fill="none" stroke="#fff" stroke-width="3"/><rect x="2" y="17" width="8" height="12" rx="2" fill="#fff"/><rect x="24" y="17" width="8" height="12" rx="2" fill="#fff"/></svg></div>
+    <div><div class="msg">Carregue o headset antes da próxima partida</div>
+      <div class="big">2 h 10 min</div>
+      <div class="sub">HyperX Cloud III Wireless · 18% · saúde 87%</div></div>
+  </div>
+  <div class="row"><div class="ic"><svg width="14" height="22" viewBox="0 0 14 22"><rect x="1" y="1" width="12" height="20" rx="6" fill="none" stroke="#fff" stroke-width="2"/></svg></div><div><b>G Pro X Superlight 2</b><span>Mouse · Lightspeed</span></div><div class="v">93%<span>61 h</span></div></div>
+  <div class="row"><div class="ic"><svg width="24" height="12" viewBox="0 0 24 12"><rect x="1" y="1" width="22" height="10" rx="2" fill="none" stroke="#fff" stroke-width="2"/></svg></div><div><b>Keychron K2 HE</b><span>Teclado · carregando</span></div><div class="v">64%<span>cheio em 48 min</span></div></div>
+  <div class="row"><div class="ic"><svg width="14" height="22" viewBox="0 0 14 22"><rect x="1" y="1" width="12" height="20" rx="2" fill="none" stroke="#fff" stroke-width="2"/></svg></div><div><b>Galaxy S24</b><span>Celular · Phone Link</span></div><div class="v">84%<span>19 h</span></div></div>
+  <div class="row sleep"><div class="ic"><svg width="24" height="16" viewBox="0 0 24 16"><path d="M5 3 H19 A4 4 0 0 1 22 8 L20 14 L15 11 H9 L4 14 L2 8 A4 4 0 0 1 5 3Z" fill="none" stroke="#fff" stroke-width="2"/></svg></div><div><b>Xbox Wireless Controller</b><span>Controle · dormindo</span></div><div class="v">71%<span>há 2 h</span></div></div>
+  <footer><span>Alerta em 15%</span><span>Histórico · Configurações</span></footer>
+</div>
+<div class="bar"><span class="tag">Headset 18%</span><span class="plain">Mouse 93%</span><div class="clock">21:47<br>21/11/2026</div></div>
+</body></html>

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Capa de Disco</title>
+<style>
+:root{--k:#0a0a0a;--w:#ededed;--m:#6a6a6a;--g:#1e1e1e;--red:#e94b35;--blue:#3fa7d6;--gold:#f2c14e}
+*{box-sizing:border-box;margin:0}
+body{width:440px;height:780px;overflow:hidden;background:#050505;font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--w);position:relative}
+.flyout{position:absolute;left:24px;right:24px;bottom:60px;background:var(--k);border-radius:6px;overflow:hidden;box-shadow:0 18px 44px rgba(0,0,0,.7);outline:1px solid #1c1c1c}
+.top{display:flex;justify-content:space-between;padding:16px 18px 0;font-size:12px;color:var(--m)}
+.plot{display:block;margin:10px auto 0}
+.read{display:flex;justify-content:space-between;align-items:flex-end;padding:6px 18px 16px;border-bottom:1px solid var(--g)}
+.read .n{font:300 56px/1 "Segoe UI Variable Display","Segoe UI",sans-serif;letter-spacing:-.03em;font-variant-numeric:tabular-nums;color:var(--red)}
+.read .d{text-align:right;font-size:12px;color:var(--m);line-height:1.5}
+.read .d b{display:block;color:var(--w);font-size:14px;font-weight:600}
+.codes{display:flex;gap:0;padding:0 18px;margin-top:12px}
+.row{display:grid;grid-template-columns:24px 1fr auto;gap:12px;align-items:center;padding:10px 18px;border-bottom:1px solid var(--g);font-size:13px}
+.row i{display:block;width:24px;height:10px}
+.row span{color:var(--m);font-size:11.5px;margin-left:6px}
+.row .v{font-variant-numeric:tabular-nums;font-weight:600}
+.row.sleep{opacity:.45}
+footer{display:flex;justify-content:space-between;padding:12px 18px;font-size:12px;color:var(--m)}
+.bar{position:absolute;left:0;right:0;bottom:0;height:48px;background:#1c1c1c;border-top:1px solid #2b2b2b;display:flex;align-items:center;justify-content:flex-end;gap:14px;padding-right:16px;font-size:12px;font-variant-numeric:tabular-nums}
+.bar i{display:inline-block;width:12px;height:6px;margin-right:6px;vertical-align:middle}
+.clock{text-align:right;line-height:1.25;color:#ddd;margin-left:6px}
+</style></head><body>
+<div class="flyout">
+  <div class="top"><span>HyperX Cloud III Wireless · headset</span><span>7 dias</span></div>
+  <svg class="plot" width="340" height="210" viewBox="0 0 340 210" aria-label="Pulso de 7 dias da bateria">
+    <g fill="#0a0a0a" stroke="#ededed" stroke-width="1.2">
+      <path d="M0 40 L60 40 L80 30 L120 34 L170 20 L210 38 L260 36 L340 40 V60 H0Z"/>
+      <path d="M0 68 L50 68 L90 52 L130 60 L160 40 L200 64 L270 62 L340 68 V90 H0Z"/>
+      <path d="M0 96 L70 96 L100 80 L140 88 L180 66 L220 92 L280 90 L340 96 V118 H0Z"/>
+      <path d="M0 124 L40 124 L80 108 L120 112 L150 92 L190 118 L260 116 L340 124 V146 H0Z"/>
+      <path d="M0 152 L60 152 L100 134 L140 142 L175 118 L215 146 L270 144 L340 152 V174 H0Z"/>
+      <path d="M0 180 L50 180 L95 162 L130 170 L170 148 L205 174 L265 172 L340 180 V202 H0Z"/>
+    </g>
+    <path d="M0 205 L60 205 L110 186 L160 192 L200 178 L240 198 L300 200 L340 205" fill="none" stroke="#e94b35" stroke-width="2.4"/>
+  </svg>
+  <div class="read"><div class="n">18%</div><div class="d"><b>2 h 10 min</b>até desligar · saúde 87%</div></div>
+  <div class="row"><i style="background:var(--blue)"></i><div>G Pro X Superlight 2<span>mouse</span></div><div class="v">93%</div></div>
+  <div class="row"><i style="background:var(--gold)"></i><div>Keychron K2 HE<span>carregando</span></div><div class="v">64%</div></div>
+  <div class="row"><i style="background:#9a9a9a"></i><div>Galaxy S24<span>celular</span></div><div class="v">84%</div></div>
+  <div class="row sleep"><i style="background:#555"></i><div>Xbox Wireless Controller<span>dormindo</span></div><div class="v">71%</div></div>
+  <footer><span>Alerta em 15%</span><span>Configurações</span></footer>
+</div>
+<div class="bar"><span style="color:var(--red)"><i style="background:var(--red)"></i>18%</span><span><i style="background:var(--blue)"></i>93%</span><div class="clock">21:47<br>21/11/2026</div></div>
+</body></html>
