@@ -16,7 +16,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, device, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID_NORDIC: u16 = 0x1915;
 pub const SORA_PIDS: &[u16] = &[SORA_RECEIVER, SORA_CABLE];
@@ -48,7 +48,7 @@ pub fn parse_sora(r: &[u8], cable: bool) -> Option<Option<(u8, bool)>> {
 fn poll_sora(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Device> {
     let cable = pid == SORA_CABLE;
     let cs = find(colls, VID_NORDIC, pid, |c| {
-        c.page == 0xFFA0 && c.usage == 1 && c.feature >= 32
+        c.page == 0xFFA0 && c.usage == 1 && c.feat_len >= 32
     });
     for c in cs {
         let Some(mut d) = hid.open(c) else { continue };
@@ -76,7 +76,7 @@ fn poll_sora(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Device> {
         }
         // Receiver answered, mouse off: not listed, the tracker keeps the last level.
         let (pct, charging) = reading?;
-        let mut s = device(
+        let mut s = Device::new(
             format!("ninjutso:{VID_NORDIC:04X}:{pid:04X}"),
             "Ninjutso Sora V2",
             Kind::Mouse,
@@ -124,7 +124,7 @@ fn query_ten(hid: &mut dyn Hid, d: &mut dyn Dev, cmd: u8) -> Option<u8> {
 
 fn poll_ten(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Device> {
     let cs = find(colls, VID_PIXART, pid, |c| {
-        c.page == 0xFF01 && c.usage == 1 && c.feature == 16
+        c.page == 0xFF01 && c.usage == 1 && c.feat_len == 16
     });
     for c in cs {
         let Some(mut d) = hid.open(c) else { continue };
@@ -143,7 +143,7 @@ fn poll_ten(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Device> {
             &c.product
         };
         let cable = pid == 0xE020;
-        let mut s = device(
+        let mut s = Device::new(
             format!("ninjutso-ten:{pid:04X}"),
             name,
             Kind::Mouse,
@@ -175,16 +175,16 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
-    use std::cell::Cell;
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn sora(pid: u16) -> Coll {
         Coll {
@@ -192,7 +192,7 @@ mod tests {
             pid,
             page: 0xFFA0,
             usage: 1,
-            feature: 704,
+            feat_len: 704,
             ..Default::default()
         }
     }
@@ -209,12 +209,12 @@ mod tests {
 
     fn sora_fake(replies: Vec<Vec<u8>>, send_ok: bool) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, sora_request()); // only the documented state query
                 send_ok.then(Vec::new)
             }
-            Op::GetFeature(id) => {
+            Op::GetFeature(id, _) => {
                 assert_eq!(id, 5);
                 q.pop_front()
             }
@@ -279,10 +279,10 @@ mod tests {
         let mut other_usage = sora(0xAE1C);
         other_usage.usage = 2;
         let mut short = sora(0xAE1C);
-        short.feature = 31;
+        short.feat_len = 31;
         let mut f = sora_fake(vec![], true);
         assert!(poll_with(&mut f, &[other_product, other_page, other_usage, short]).is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
     }
 
     #[test]
@@ -320,7 +320,7 @@ mod tests {
             pid,
             page: 0xFF01,
             usage: 1,
-            feature: 16,
+            feat_len: 16,
             path: "test".into(),
             product: "Ninjutso Ten Air".into(),
             ..Default::default()
@@ -344,25 +344,25 @@ mod tests {
 
     fn ten_run(replies: Vec<Vec<u8>>, c: Coll, send_ok: bool, open_ok: bool) -> Run {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        let reads = Rc::new(Cell::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
         let r = reads.clone();
-        let mut f = Fake::new(move |_, op| match op {
+        let mut f = Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, ten_request(w[1]));
                 send_ok.then(Vec::new)
             }
-            Op::GetFeature(id) => {
+            Op::GetFeature(id, _) => {
                 assert_eq!(id, 0x06);
-                r.set(r.get() + 1);
+                r.fetch_add(1, Ordering::Relaxed);
                 q.pop_front()
             }
             _ => None,
         });
-        f.open_ok.set(open_ok);
+        f.s().refuse_open = !open_ok;
         let out = poll_with(&mut f, &[c]);
         let writes = f
+            .s()
             .log
-            .borrow()
             .iter()
             .filter_map(|(_, o)| match o {
                 Op::SetFeature(w) => Some(w.clone()),
@@ -372,8 +372,8 @@ mod tests {
         Run {
             out,
             writes,
-            reads: reads.get(),
-            opens: f.opens.get(),
+            reads: reads.load(Ordering::Relaxed),
+            opens: f.s().opened.len(),
         }
     }
 
@@ -470,8 +470,8 @@ mod tests {
                 1 => c.page = 0xFF00,
                 2 => c.page = 0xFF02,
                 3 => c.usage = 2,
-                4 => c.feature = 64,
-                _ => c.feature = 0,
+                4 => c.feat_len = 64,
+                _ => c.feat_len = 0,
             }
             let r = ten_run(vec![], c, true, true);
             assert_eq!((r.opens, r.writes.len()), (0, 0));

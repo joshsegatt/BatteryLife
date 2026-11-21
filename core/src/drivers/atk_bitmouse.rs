@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, ms_left, read_until};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, left, read_until};
 use crate::registry::Match;
 
 const VID: u16 = 0x373B;
@@ -38,7 +38,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -80,7 +80,7 @@ fn query(d: &mut dyn Dev, cmd: u8, link: Link, end: Instant) -> Option<u8> {
         return None;
     }
     let end = end.min(Instant::now() + Duration::from_millis(REPLY_MS));
-    let r = read_until(d, end, |r| parse(r, cmd, link).is_some())?;
+    let r = read_until(d, left(end), |r| parse(r, cmd, link).is_some())?;
     parse(&r, cmd, link)?.ok()
 }
 
@@ -93,13 +93,13 @@ fn mouse(key: &str, name: &str, via: &str, pct: u8, charging: bool) -> Device {
     s
 }
 
-fn poll_zero(colls: &[Coll], io: &mut dyn Io, end: Instant) -> Option<Device> {
+fn poll_zero(colls: &[Coll], io: &mut dyn Hid, end: Instant) -> Option<Device> {
     // The cable first, for a fresh reading while charging; one key on either link.
     for pid in [ZERO_CABLE, ZERO_RECEIVERS[0], ZERO_RECEIVERS[1]] {
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFF05 && c.usage == 1 && c.out_len == 64 && c.in_len == 64
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return None;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -140,11 +140,11 @@ pub fn parse_nano_8k(r: &[u8]) -> Option<(u8, bool)> {
         .then_some((level, r[8] & 0x80 != 0))
 }
 
-fn poll_nano_8k(colls: &[Coll], io: &mut dyn Io, end: Instant) -> Option<Device> {
+fn poll_nano_8k(colls: &[Coll], io: &mut dyn Hid, end: Instant) -> Option<Device> {
     for c in find(colls, VID, NANO_8K_DONGLE, |c| {
         c.page == 0xFF10 && c.usage == 1 && c.feat_len >= 9 && c.in_len >= 11
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -155,7 +155,7 @@ fn poll_nano_8k(colls: &[Coll], io: &mut dyn Io, end: Instant) -> Option<Device>
         let until = end.min(Instant::now() + Duration::from_millis(REPLY_MS));
         // Other input reports (e.g. 12 DPI / rate notifications) are skipped; short ones end the wait.
         let mut short = false;
-        let Some(r) = read_until(d.as_mut(), until, |r| {
+        let Some(r) = read_until(d.as_mut(), left(until), |r| {
             short |= r.len() < 10;
             short || r[0] == 0x82
         }) else {
@@ -177,11 +177,11 @@ fn poll_nano_8k(colls: &[Coll], io: &mut dyn Io, end: Instant) -> Option<Device>
     None
 }
 
-fn poll_nano(colls: &[Coll], io: &mut dyn Io, end: Instant) -> Option<Device> {
+fn poll_nano(colls: &[Coll], io: &mut dyn Hid, end: Instant) -> Option<Device> {
     for c in find(colls, VID, NANO_DONGLE, |c| {
         c.page == 0xFF05 && c.usage == 1 && c.out_len >= 64 && c.in_len >= 8
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -203,7 +203,7 @@ fn poll_nano(colls: &[Coll], io: &mut dyn Io, end: Instant) -> Option<Device> {
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     [
         poll_zero(colls, io, end),
@@ -218,7 +218,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, State, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, State, iface_coll as coll};
     use std::sync::{Arc, Mutex};
 
     fn atk(pid: u16) -> Coll {
@@ -235,35 +235,39 @@ mod tests {
     /// The fake of atk_zero_driver_test: checks every request, then queues a short report, a reply
     /// to another command and the real reply.
     fn device(cfg: Arc<Mutex<Cfg>>) -> Fake {
-        Fake::with(move |s: &mut State, path: &str, kind, q| {
-            assert_eq!(kind, Sent::Write);
-            assert!(q.len() == 64 && q[0] == 8 && q[2] == 0x72 && q[3] == 2 && q[7] == 1);
-            let nk = path.contains(":1216:");
-            let cable = path.contains(":1154:");
-            assert_eq!(q[5], if cable { 0 } else { 1 });
-            if nk {
-                let sum = q[2..].iter().fold(0u8, |a, b| a.wrapping_add(*b));
-                assert_eq!(q[1], sum);
-            } else {
-                assert!(q[1] == 0x7D && (q[6] == 7 || (cable && q[6] == 8)));
+        Fake::with(move |s: &mut State, fc, op| {
+            if let Some(q) = op.sent() {
+                let path = fc.path.as_str();
+                assert!(matches!(op, Op::Write(_)));
+                assert!(q.len() == 64 && q[0] == 8 && q[2] == 0x72 && q[3] == 2 && q[7] == 1);
+                let nk = path.contains(":1216:");
+                let cable = path.contains(":1154:");
+                assert_eq!(q[5], if cable { 0 } else { 1 });
+                if nk {
+                    let sum = q[2..].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+                    assert_eq!(q[1], sum);
+                } else {
+                    assert!(q[1] == 0x7D && (q[6] == 7 || (cable && q[6] == 8)));
+                }
+                let c = *cfg.lock().unwrap();
+                let value = if q[6] == 7 {
+                    c.level
+                } else if nk {
+                    1
+                } else {
+                    2
+                };
+                let mut r = vec![8, 0x72, c.status, 0x3A, 0, q[6], 1, value];
+                if c.bad_header {
+                    r[6] = 0;
+                }
+                s.push_input("", vec![8]);
+                let mut wrong = r.clone();
+                wrong[5] = 0xFF;
+                s.push_input("", wrong);
+                s.push_input("", r);
             }
-            let c = *cfg.lock().unwrap();
-            let value = if q[6] == 7 {
-                c.level
-            } else if nk {
-                1
-            } else {
-                2
-            };
-            let mut r = vec![8, 0x72, c.status, 0x3A, 0, q[6], 1, value];
-            if c.bad_header {
-                r[6] = 0;
-            }
-            s.push_input("", vec![8]);
-            let mut wrong = r.clone();
-            wrong[5] = 0xFF;
-            s.push_input("", wrong);
-            s.push_input("", r);
+            fake::queued(s, fc, op)
         })
     }
 
@@ -287,7 +291,7 @@ mod tests {
         let out = poll_with(&[atk(0x1155), atk(0x124F), atk(0x1154)], &mut f);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].via, "USB cable");
-        assert_eq!(f.s().opens, 1);
+        assert_eq!(f.s().opened.len(), 1);
     }
 
     #[test]
@@ -322,7 +326,7 @@ mod tests {
             }
             let mut f = device(cfg(46, 0, false));
             assert!(poll_with(&[c], &mut f).is_empty());
-            assert_eq!(f.s().opens, 0);
+            assert_eq!(f.s().opened.len(), 0);
         }
     }
 
@@ -332,10 +336,14 @@ mod tests {
         assert_eq!(parse_nano_8k(&r), Some((71, true)));
         r[9] = 0;
         assert_eq!(parse_nano_8k(&r), None, "no mouse linked");
-        let mut f = Fake::with(|s, _, kind, q| {
-            assert_eq!((kind, q), (Sent::Feature, &[0x00, 0x82][..]));
-            s.push_input("", vec![0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            s.push_input("", vec![0x82, 1, 2, 3, 4, 5, 6, 0, 55, 1, 0]);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetFeature(_)));
+                assert_eq!(q, &[0x00, 0x82][..]);
+                s.push_input("", vec![0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                s.push_input("", vec![0x82, 1, 2, 3, 4, 5, 6, 0, 55, 1, 0]);
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(&[coll(VID, 0x1178, 0, 0xFF10, 1, 65, 65, 9)], &mut f);
         assert_eq!((out[0].percent, out[0].charging), (Some(55), false));

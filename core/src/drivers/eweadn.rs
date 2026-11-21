@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x372E;
@@ -31,7 +31,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn request(cmd: u8, sub: u8) -> [u8; 64] {
@@ -59,12 +59,12 @@ pub fn battery(b: u8) -> Option<(u8, bool)> {
     (level <= 100).then_some((level, b & 0x80 != 0))
 }
 
-fn query(d: &mut dyn Dev, io: &mut dyn Io, cmd: u8, sub: u8) -> Option<Vec<u8>> {
+fn query(d: &mut dyn Dev, io: &mut dyn Hid, cmd: u8, sub: u8) -> Option<Vec<u8>> {
     if !d.set_feature(&request(cmd, sub)) {
         return None;
     }
     for _ in 0..3 {
-        io.sleep(100);
+        io.sleep(Duration::from_millis(100));
         if let Some(data) = d.get_feature(REPORT_ID).and_then(|r| parse(&r)) {
             return Some(data);
         }
@@ -72,10 +72,10 @@ fn query(d: &mut dyn Dev, io: &mut dyn Io, cmd: u8, sub: u8) -> Option<Vec<u8>> 
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         if pid != RECEIVER && pid != S9_ULTRA_CABLE {
             continue;
         }
@@ -83,16 +83,24 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFF00 && c.usage == 1 && c.feat_len == 64
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
+            let key = format!("eweadn:{}:{}", hex4(VID), hex4(pid));
+            let (name, via) = if cable {
+                ("EWEADN S9 Ultra", "USB cable")
+            } else {
+                ("EWEADN wireless mouse", "2.4 GHz receiver")
+            };
             if !cable {
                 let Some(online) = query(d.as_mut(), io, 0x47, 0x00) else {
                     continue;
                 };
                 if online[0] != 1 {
-                    break; // receiver present, mouse off or out of range (BatteryHub hides it)
+                    // Receiver present, mouse off or out of range: hidden at once.
+                    out.push(Device::switched_off(key, name, Kind::Mouse, via));
+                    break;
                 }
             }
             let Some((pct, charging)) =
@@ -100,20 +108,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
             else {
                 continue;
             };
-            let mut s = Device::new(
-                format!("eweadn:{}:{}", hex4(VID), hex4(pid)),
-                if cable {
-                    "EWEADN S9 Ultra"
-                } else {
-                    "EWEADN wireless mouse"
-                },
-                Kind::Mouse,
-                if cable {
-                    "USB cable"
-                } else {
-                    "2.4 GHz receiver"
-                },
-            );
+            let mut s = Device::new(key, name, Kind::Mouse, via);
             s.percent = Some(pct);
             s.charging = charging;
             s.grace = Duration::from_secs(600);
@@ -127,7 +122,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(sub: u8, data: &[u8]) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -158,14 +153,18 @@ mod tests {
 
     #[test]
     fn reads_the_mouse_behind_the_receiver() {
-        let mut f = Fake::with(|s, _, _, q| {
-            let r = if q[5] == 0x47 {
-                reply(0, &[1])
-            } else {
-                reply(0x81, &[0x80 | 57])
-            };
-            s.push_feature("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                let r = if q[5] == 0x47 {
+                    reply(0, &[1])
+                } else {
+                    reply(0x81, &[0x80 | 57])
+                };
+                s.push_feature("", r);
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let out = poll_with(&[coll(VID, RECEIVER, 2, 0xFF00, 1, 0, 0, 64)], &mut f);
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].percent, out[0].charging), (Some(57), true));
@@ -174,10 +173,19 @@ mod tests {
 
     #[test]
     fn offline_mouse_and_bad_replies() {
-        let mut f = Fake::with(|s, _, _, _| s.push_feature("", reply(0, &[0])));
-        assert!(poll_with(&[coll(VID, RECEIVER, 2, 0xFF00, 1, 0, 0, 64)], &mut f).is_empty());
+        let mut f = Fake::with(|s, fc, op| {
+            if op.sent().is_some() {
+                s.push_feature("", reply(0, &[0]));
+            }
+            fake::queued(s, fc, op)
+        });
+        f.s().pad_features = true;
+        let out = poll_with(&[coll(VID, RECEIVER, 2, 0xFF00, 1, 0, 0, 64)], &mut f);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].off && out[0].percent.is_none());
+        assert_eq!(out[0].key, "eweadn:372E:103D");
         assert_eq!(
-            f.s().sent.len(),
+            f.s().sends(),
             1,
             "no battery read while the mouse is offline"
         );

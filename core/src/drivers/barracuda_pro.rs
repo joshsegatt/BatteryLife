@@ -9,10 +9,12 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits HaloBattery
 //! (providers/barracuda.py).
 
+use std::time::Duration;
+
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x1532;
 pub const PID: u16 = 0x053A;
@@ -46,22 +48,28 @@ pub fn reply_value(r: &[u8], cmd: u8) -> Option<u8> {
         .then(|| r[16])
 }
 
-fn drain(io: &mut dyn Io) {
+fn drain(io: &mut dyn Dev) {
     for _ in 0..8 {
-        if io.read(20).is_none_or(|r| r.is_empty()) {
+        if io
+            .read(Duration::from_millis(20))
+            .is_none_or(|r| r.is_empty())
+        {
             break;
         }
     }
 }
 
-fn ask(io: &mut dyn Io, cmd: u8) -> Option<u8> {
+fn ask(io: &mut dyn Dev, cmd: u8) -> Option<u8> {
     for _ in 0..4 {
         drain(io);
         if !io.write(&query_frame(cmd)) {
             return None;
         }
         for _ in 0..6 {
-            if let Some(v) = io.read(150).and_then(|r| reply_value(&r, cmd)) {
+            if let Some(v) = io
+                .read(Duration::from_millis(150))
+                .and_then(|r| reply_value(&r, cmd))
+            {
                 return Some(v);
             }
         }
@@ -69,12 +77,12 @@ fn ask(io: &mut dyn Io, cmd: u8) -> Option<u8> {
     None
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let colls = find(colls, VID, PID, |c| c.page == 0xFF00 && c.out_len >= 64);
     let Some(c) = colls.first() else {
         return Vec::new();
     };
-    let Some(mut io) = open(c) else {
+    let Some(mut io) = hid.open(c) else {
         return Vec::new();
     };
     let io = io.as_mut();
@@ -85,11 +93,11 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
         if remote {
             break;
         }
-        io.sleep(150 * (attempt + 1));
+        io.sleep(Duration::from_millis(150 * (attempt + 1)));
     }
     let (mut level, mut charging) = (None, None);
     if remote {
-        io.sleep(50);
+        io.sleep(Duration::from_millis(50));
         level = ask(io, 0x21);
         if level.is_some() {
             charging = ask(io, 0x2A);
@@ -97,30 +105,30 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
         drain(io);
         io.write(&remote_frame(false));
     }
-    // No level: receiver present, headset off or out of range.
-    let Some(level) = level.filter(|l| *l <= 100) else {
-        return Vec::new();
-    };
     let mut d = Device::new(
         "barracuda:053A",
         "Razer Barracuda Pro",
         Kind::Headset,
         "2.4 GHz receiver",
     );
+    // No level: receiver present, headset off or out of range.
+    let Some(level) = level.filter(|l| *l <= 100) else {
+        d.off = true;
+        return vec![d];
+    };
     d.percent = Some(level);
     d.charging = charging.is_some_and(|c| c > 0);
     vec![d]
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn reply(cmd: u8, value: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -148,27 +156,26 @@ mod tests {
 
     #[test]
     fn reads_level_and_charging_inside_remote_mode() {
-        let f = Fake::new();
-        f.replies(|w| match (w[7], w[8]) {
+        let f = Fake::replies(|w| match (w[7], w[8]) {
             (0x03, cmd) => vec![reply(cmd, if cmd == 0x21 { 62 } else { 1 })],
             _ => vec![],
         });
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, PID, 0xFF00, 1, 64, 64);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].key, "barracuda:053A");
         assert_eq!((out[0].percent, out[0].charging), (Some(62), true));
-        let writes = f.s().writes.clone();
+        let writes = f.s().writes().clone();
         assert_eq!(writes.first().unwrap()[..10], remote_frame(true)[..10]);
         assert_eq!(writes.last().unwrap()[..10], remote_frame(false)[..10]);
     }
 
     #[test]
-    fn headset_off_lists_nothing() {
+    fn headset_off_is_listed_switched_off() {
         let f = Fake::new();
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, PID, 0xFF00, 1, 64, 64);
-        assert!(poll_colls(&[c], &mut *f.opener(&opened)).is_empty());
+        let out = poll_colls(&[c], &mut f.clone());
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, "barracuda:053A");
     }
 }

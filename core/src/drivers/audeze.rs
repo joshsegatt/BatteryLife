@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x3329;
 /// (pid, cable, name); cables first: the direct connection wins.
@@ -53,7 +53,7 @@ fn request() -> [u8; 62] {
     req
 }
 
-pub fn read_level(io: &mut dyn Io) -> Option<u8> {
+pub fn read_level(io: &mut dyn Dev) -> Option<u8> {
     let mut level = None;
     for _ in 0..2 {
         if !io.write(&request()) {
@@ -61,8 +61,8 @@ pub fn read_level(io: &mut dyn Io) -> Option<u8> {
         }
         // The answer can arrive a little later; the newest frame counts.
         for i in 0..4 {
-            io.sleep(60);
-            let Some(r) = io.get_input_report(0x07) else {
+            io.sleep(Duration::from_millis(60));
+            let Some(r) = io.get_input(0x07) else {
                 continue;
             };
             if let Some(l) = find_level(&r) {
@@ -79,7 +79,7 @@ pub fn read_level(io: &mut dyn Io) -> Option<u8> {
     level
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid, st: &mut State) -> Vec<Device> {
     for &(pid, cable, name) in MODELS {
         let found = find(colls, VID, pid, |c| {
             c.page == 0xFF13 && c.usage == 0x0001 && c.in_len > 0
@@ -93,7 +93,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
             st.first_seen.retain(|(p, _)| *p != pid);
             continue;
         }
-        let level = open(c).and_then(|mut io| read_level(io.as_mut()));
+        let level = hid.open(c).and_then(|mut io| read_level(io.as_mut()));
         let now = Instant::now();
         if !st.first_seen.iter().any(|(p, _)| *p == pid) {
             st.first_seen.push((pid, now));
@@ -123,40 +123,43 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(State::default);
-    hid_io::run(api, infos, |colls, open| poll_colls(colls, open, st))
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid, st))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn level(n: u8) -> Vec<u8> {
         vec![7, 8, 0x80, 0xD6, 0x0C, 0, 0, n]
     }
     fn frames(f: Vec<Vec<u8>>) -> Fake {
         let fake = Fake::new();
-        fake.s().inputs = f.into();
+        fake.s().input_reports.insert(String::new(), f.into());
         fake
+    }
+    /// One open collection on the fake.
+    fn dev(f: &Fake) -> Box<dyn Dev> {
+        f.clone().open(&Coll::default()).unwrap()
     }
     fn counts(f: &Fake) -> (usize, usize) {
         let s = f.s();
-        (s.writes.len(), s.input_reads)
+        (s.writes().len(), s.input_reads())
     }
 
     // tests/audeze_retry_test.cpp
     #[test]
     fn newest_frame_and_retry() {
         let f = frames(vec![level(80), level(81), level(82)]);
-        assert_eq!(read_level(&mut f.clone()), Some(82));
+        assert_eq!(read_level(dev(&f).as_mut()), Some(82));
         assert_eq!(counts(&f), (1, 3));
         let mut expected = vec![0u8; 62];
         expected[..9].copy_from_slice(&[6, 7, 0x80, 5, 0x5A, 3, 0, 0xD6, 0x0C]);
-        assert_eq!(f.s().writes[0], expected);
+        assert_eq!(f.s().writes()[0], expected);
 
         let f = frames(vec![vec![], vec![], vec![], level(73)]);
-        assert_eq!(read_level(&mut f.clone()), Some(73));
+        assert_eq!(read_level(dev(&f).as_mut()), Some(73));
         assert_eq!(counts(&f), (1, 4));
 
         let f = frames(vec![
@@ -168,20 +171,20 @@ mod tests {
             vec![],
             vec![],
         ]);
-        assert_eq!(read_level(&mut f.clone()), Some(65));
+        assert_eq!(read_level(dev(&f).as_mut()), Some(65));
         assert_eq!(counts(&f), (2, 8));
 
         let f = frames(vec![vec![7], vec![7, 0xD6, 0x0C, 0, 0, 101]]);
-        assert_eq!(read_level(&mut f.clone()), None);
+        assert_eq!(read_level(dev(&f).as_mut()), None);
         assert_eq!(counts(&f), (2, 8));
 
         for l in [0, 100] {
             let f = frames(vec![level(l), level(l), level(l)]);
-            assert_eq!(read_level(&mut f.clone()), Some(l));
+            assert_eq!(read_level(dev(&f).as_mut()), Some(l));
         }
         let f = Fake::new();
-        f.s().write_ok = false;
-        assert_eq!(read_level(&mut f.clone()), None);
+        f.s().refuse_send = true;
+        assert_eq!(read_level(dev(&f).as_mut()), None);
         assert_eq!(counts(&f), (1, 0));
     }
 
@@ -195,10 +198,9 @@ mod tests {
     fn identity_per_product() {
         for pid in [0x4B29, 0x4B28, 0x4B19, 0x4B1A] {
             let f = frames(vec![level(86), level(86), level(86)]);
-            let opened = RefCell::new(Vec::new());
             let out = poll_colls(
                 &[maxwell(pid, "Audeze Maxwell")],
-                &mut *f.opener(&opened),
+                &mut f.clone(),
                 &mut State::default(),
             );
             assert_eq!(out.len(), 1);
@@ -229,19 +231,17 @@ mod tests {
         wrong.push(maxwell(0x4B29, "Audeze Maxwell 2 Dongle"));
         for c in wrong {
             let f = frames(vec![level(86)]);
-            let opened = RefCell::new(Vec::new());
-            let out = poll_colls(&[c], &mut *f.opener(&opened), &mut State::default());
-            assert!(out.is_empty() && opened.borrow().is_empty());
+            let out = poll_colls(&[c], &mut f.clone(), &mut State::default());
+            assert!(out.is_empty() && f.s().opened.is_empty());
         }
     }
 
     #[test]
     fn power_on_zero_is_not_trusted() {
         let f = frames(vec![level(0), level(0), level(0)]);
-        let opened = RefCell::new(Vec::new());
         let out = poll_colls(
             &[maxwell(0x4B19, "Audeze Maxwell")],
-            &mut *f.opener(&opened),
+            &mut f.clone(),
             &mut State::default(),
         );
         assert_eq!((out[0].percent, out[0].asleep), (None, true));

@@ -6,8 +6,10 @@
 //!   cmd 04 = battery       -> [6] percent, [7] charging, [8..9] millivolts (big-endian)
 //!
 //! FF02:0002 is tried first where it exists. These vendor ids are shared with Chimera, AULA, ATK,
-//! Pulsar, Glorious and Hitscan drivers, so only the product ids BatteryHub names for this protocol
-//! are declared (BatteryHub itself scans every unclaimed product of these vendors).
+//! Pulsar, Glorious and Hitscan drivers, so the product ids BatteryHub names for this protocol are
+//! claimed here, and the other products of these vendors come through the registry's chains (after
+//! Glorious on 3770 and 33E4), as BatteryHub scans every unclaimed product of these vendors. The
+//! products BatteryHub never sends mouse frames to are skipped (`never_ask`).
 //!
 //! Ported from BatteryHub (src/drivers/kysona.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which cites Linux
@@ -20,7 +22,8 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, kind_of, ms_left};
+use crate::drivers::glorious::{gwolves_cable, gwolves_name};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, kind_from_colls, left, pids};
 use crate::registry::Match;
 
 const REDRAGON: [u16; 3] = [0xF55D, 0xF5D5, 0xF55E];
@@ -43,7 +46,8 @@ pub static MATCHES: &[Match] = &[
         vid: 0x3770,
         pids: &[0x0200],
     },
-    // G-Wolves Fenrir Asym, the model kysona.cpp names; other G-Wolves ids use Glorious' protocol.
+    // G-Wolves Fenrir Asym, the model kysona.cpp names; other G-Wolves ids are tried with Glorious'
+    // protocol first (registry chains).
     Match {
         vid: 0x33E4,
         pids: &[0x3519],
@@ -60,8 +64,26 @@ pub static MATCHES: &[Match] = &[
     },
 ];
 
+/// The vendors BatteryHub scans for this protocol, in its order.
+const VENDORS: [u16; 6] = [0x3554, 0x373B, 0x3770, 0x33E4, 0x3710, 0x35BB];
+
+/// Products of these vendors that speak something else, so they never get mouse frames, even when
+/// their own driver reports nothing (an app holding the port, a sleeping device).
+fn never_ask(vid: u16, pid: u16) -> bool {
+    match vid {
+        // ATK N9 Pro / N9 Ultra headsets (a serial protocol) and the ATK 8K Nano dongle 1178.
+        0x373B => [0x11CA, 0x11CB, 0x1203, 0x1204, 0x1178].contains(&pid),
+        // The "BY" keyboard receivers AULA handles: two mouse frames every poll kept a Redragon
+        // K673 from going to sleep (BatteryHub issue #191).
+        0x3554 => [0xFA09, 0xFB40].contains(&pid),
+        // HECATE headsets (G2 Wireless 7.1): only HECATE's mouse ids.
+        0x35BB => ![0xD3FA, 0xD3FB, 0xD3FC, 0xD3FD].contains(&pid),
+        _ => false,
+    }
+}
+
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn checksum(b: &[u8]) -> u8 {
@@ -91,20 +113,14 @@ fn key_pid(vid: u16, pid: u16) -> u16 {
 }
 
 fn is_cable(vid: u16, pid: u16) -> bool {
-    // G-Wolves' wired ids (glorious.cpp's GWolvesIsCable) include 3519.
-    (vid == 0x33E4 && pid == 0x3519)
+    (vid == 0x33E4 && gwolves_cable(pid))
         || (vid == 0x35BB && [0xD3FA, 0xD3FC, 0xD3FD].contains(&pid))
         || (vid == 0x3554 && [0xF55E, 0xF58C, 0xF58F, 0xF506].contains(&pid))
 }
 
 pub fn clean_name(product: &str, vid: u16, pid: u16) -> String {
     if vid == 0x33E4 {
-        return if pid == 0x3519 {
-            "G-Wolves Fenrir Asym"
-        } else {
-            "G-Wolves wireless mouse"
-        }
-        .into();
+        return gwolves_name(pid).into();
     }
     if vid == 0x3554 && REDRAGON.contains(&pid) {
         return "Redragon wireless mouse".into(); // shared by several models
@@ -142,8 +158,8 @@ fn query(d: &mut dyn Dev, cmd: u8, end: Instant) -> Option<Vec<u8>> {
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return None;
         }
         let r = d.read(left).filter(|r| r.len() >= 17)?;
@@ -170,7 +186,7 @@ fn read_one(d: &mut dyn Dev, c: &Coll, colls: &[Coll], end: Instant) -> Outcome 
     let mut s = Device::new(
         format!("kysona:{}:{}", hex4(vid), hex4(key_pid(vid, pid))),
         clean_name(&c.product, vid, pid),
-        match kind_of(colls, vid, pid) {
+        match kind_from_colls(colls, vid, pid) {
             Kind::Other => Kind::Mouse,
             k => k,
         },
@@ -203,19 +219,22 @@ fn read_one(d: &mut dyn Dev, c: &Coll, colls: &[Coll], end: Instant) -> Outcome 
     }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out: Vec<Device> = Vec::new();
-    for m in MATCHES {
-        for &pid in m.pids {
-            let mut cs = find(colls, m.vid, pid, |c| {
+    for vid in VENDORS {
+        for pid in pids(colls, vid) {
+            if never_ask(vid, pid) {
+                continue;
+            }
+            let mut cs = find(colls, vid, pid, |c| {
                 (c.out_len == 17 && c.in_len == 17)
                     || (c.page >= 0xFF00 && c.out_len >= 17 && c.in_len >= 17)
             });
             // The battery channel is FF02:0002 where it exists.
             cs.sort_by_key(|c| !(c.page == 0xFF02 && c.usage == 2));
             for c in cs {
-                if ms_left(end) == 0 {
+                if left(end).is_zero() {
                     return out;
                 }
                 let Some(mut d) = io.open(c) else { continue };
@@ -244,7 +263,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(cmd: u8, b6: u8, b7: u8) -> Vec<u8> {
         let mut r = vec![0u8; 17];
@@ -261,16 +280,19 @@ mod tests {
     }
 
     fn device(online: u8, battery: Option<(u8, u8)>) -> Fake {
-        Fake::with(move |s, _, _, q| {
-            assert!(q == request(3) || q == request(4));
-            match q[1] {
-                3 => s.push_input("", reply(3, online, 0)),
-                _ => {
-                    if let Some((p, c)) = battery {
-                        s.push_input("", reply(4, p, c));
+        Fake::with(move |s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(q == request(3) || q == request(4));
+                match q[1] {
+                    3 => s.push_input("", reply(3, online, 0)),
+                    _ => {
+                        if let Some((p, c)) = battery {
+                            s.push_input("", reply(4, p, c));
+                        }
                     }
                 }
             }
+            fake::queued(s, fc, op)
         })
     }
 
@@ -319,12 +341,38 @@ mod tests {
         let mut f = device(0, Some((76, 0)));
         assert!(poll_with(&[vxe(0xF58A)], &mut f).is_empty());
         assert_eq!(
-            f.s().sent.len(),
+            f.s().sends(),
             1,
             "no battery query when the dongle says offline"
         );
         let out = poll_with(&[vxe(0xF58A)], &mut device(1, None));
         assert!(out[0].asleep && out[0].percent.is_none());
+    }
+
+    #[test]
+    fn chained_products_and_the_ones_never_asked() {
+        // A G-Wolves model that came down the chain after Glorious' protocol.
+        let mut gw = coll(0x33E4, 0x5408, 1, 0xFF02, 2, 17, 17, 0);
+        gw.product = "G-Wolves 8K Dongle".into();
+        let out = poll_with(&[gw], &mut device(1, Some((55, 0))));
+        assert_eq!(
+            (
+                out[0].key.as_str(),
+                out[0].name.as_str(),
+                out[0].via.as_str()
+            ),
+            ("kysona:33E4:5408", "G-Wolves HTS Plus", "USB cable")
+        );
+        // AULA's keyboard receivers, ATK headsets and HECATE headsets never get mouse frames.
+        for (vid, pid) in [(0x3554, 0xFA09), (0x373B, 0x11CA), (0x35BB, 0x1234)] {
+            let mut f = device(1, Some((55, 0)));
+            assert!(poll_with(&[coll(vid, pid, 1, 0xFF02, 2, 17, 17, 0)], &mut f).is_empty());
+            assert_eq!(f.s().opened.len(), 0, "{vid:04X}:{pid:04X}");
+        }
+        // Other vendors are not this driver's.
+        let mut f = device(1, Some((55, 0)));
+        assert!(poll_with(&[coll(0x1234, 0x0001, 1, 0xFF02, 2, 17, 17, 0)], &mut f).is_empty());
+        assert_eq!(f.s().opened.len(), 0);
     }
 
     #[test]

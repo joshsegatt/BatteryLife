@@ -9,12 +9,12 @@
 //! Ported from BatteryHub (src/drivers/nuphy.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{BUDGET, CABLE, Coll, Opener, colls, hid_opener, sum, wait_for};
+use crate::drivers::hid::{self, CABLE, Coll, Hid, read_until, sum};
 
 pub const VID: u16 = 0x19F5;
 pub const PIDS: &[u16] = &[0xA011];
@@ -32,7 +32,7 @@ pub fn parse(r: &[u8]) -> Option<(u8, bool)> {
     Some((r[8] & 0x7F, r[8] & 0x80 != 0))
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     for c in colls.iter().filter(|c| {
         c.is(VID, 0xA011)
             && c.iface == 1
@@ -41,12 +41,14 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
             && c.in_len == 65
             && c.out_len == 65
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         port.flush();
         if !port.write(&REQUEST) {
             continue;
         }
-        let Some(r) = wait_for(port.as_mut(), Duration::from_millis(400), |r| {
+        let Some(r) = read_until(port.as_mut(), Duration::from_millis(400), |r| {
             parse(r).is_some()
         }) else {
             continue;
@@ -62,13 +64,13 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, per_write};
 
     fn collection() -> Coll {
         let mut c = coll(VID, 0xA011, 1, 0, 65);
@@ -87,9 +89,9 @@ mod tests {
         r
     }
 
-    fn run(replies: Vec<Vec<u8>>, c: Coll) -> (Vec<Device>, fake::Shared) {
-        let s = fake::per_write(vec![replies]);
-        (poll_with(&[c], &mut fake::opener(&s)), s)
+    fn run(replies: Vec<Vec<u8>>, c: Coll) -> (Vec<Device>, Fake) {
+        let s = per_write(vec![replies]);
+        (poll_with(&[c], &mut s.clone()), s)
     }
 
     #[test]
@@ -100,7 +102,7 @@ mod tests {
             assert_eq!(out[0].percent, Some(level & 0x7F));
             assert_eq!(out[0].charging, level & 0x80 != 0);
             assert_eq!(out[0].kind, Kind::Keyboard);
-            assert_eq!(s.borrow().writes, vec![REQUEST.to_vec()]);
+            assert_eq!(s.s().writes(), vec![REQUEST.to_vec()]);
         }
     }
 
@@ -132,7 +134,7 @@ mod tests {
                 _ => c.out_len -= 1,
             }
             let (out, s) = run(vec![reply(50)], c);
-            assert!(out.is_empty() && s.borrow().opened.is_empty());
+            assert!(out.is_empty() && s.s().opened.is_empty());
         }
     }
 }

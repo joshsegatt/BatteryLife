@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x2516;
@@ -26,7 +26,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn model_name(pid: u16, model: u8) -> &'static str {
@@ -67,8 +67,8 @@ fn query(d: &mut dyn Dev, end: Instant) -> Option<Vec<u8>> {
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return None;
         }
         let r = d.read(left).filter(|r| r.len() >= 13)?;
@@ -78,16 +78,16 @@ fn query(d: &mut dyn Dev, end: Instant) -> Option<Vec<u8>> {
     }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out: Vec<Device> = Vec::new();
     // Sorted: the cable ids come before the dongle.
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         if ![DONGLE, MM712_CABLE, MM731_CABLE].contains(&pid) {
             continue;
         }
         for c in find(colls, VID, pid, |c| c.iface == 3 && c.page == 0xFF0A) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(s) = io
@@ -115,7 +115,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn status(model: u8, pct: u8, charging: u8, link: u8) -> Vec<u8> {
         let mut r = vec![0u8; 32];
@@ -140,10 +140,14 @@ mod tests {
 
     #[test]
     fn cable_and_dongle_are_listed_once() {
-        let mut f = Fake::with(|s, path, _, q| {
-            assert_eq!(q, [0, 0x46, 0x81, 0]);
-            let cable = path.contains("0169");
-            s.push_input(path, status(0x50, 60, u8::from(cable), u8::from(!cable)));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                let path = fc.path.as_str();
+                assert_eq!(q, [0, 0x46, 0x81, 0]);
+                let cable = path.contains("0169");
+                s.push_input(path, status(0x50, 60, u8::from(cable), u8::from(!cable)));
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(
             &[

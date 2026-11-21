@@ -1,26 +1,29 @@
-//! Glorious (Sinowealth 258A), Hitscan (3770) and the WLMouse YING (36A7:A874) wireless mice, on one
-//! supplier protocol: SET_FEATURE report 0 (64 bytes) [3]=02 [4]=02 [6]=83, then GET_FEATURE report
+//! Glorious (Sinowealth 258A), Hitscan (3770), G-Wolves (33E4) and the WLMouse YING (36A7:A874)
+//! wireless mice, on one supplier protocol (G-Wolves calls it "XVI"): SET_FEATURE report 0 (64 bytes) [3]=02 [4]=02 [6]=83, then GET_FEATURE report
 //! 0 -> [1] status, [6] 83, [7] charging (1), [8] percent. Status A1 awake, A4 asleep, A0 waking up
 //! (asked again once), anything else = not this protocol. Only this read is sent.
 //!
-//! G-Wolves (33E4) mice speak either this protocol or Kysona's, and BatteryHub tells them apart by
-//! probing both; a declarative registry cannot, so 33E4 is left to the Kysona port.
+//! G-Wolves and Hitscan mice speak either this protocol or Kysona's, and BatteryHub tells them apart
+//! by probing both, this one first: the registry's chains do the same for the products no driver
+//! claims exactly.
 //!
 //! Ported from BatteryHub (src/drivers/glorious.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits
-//! glorious-indicator, glorious-ctl and Hitscan's web configurator.
+//! glorious-indicator, glorious-ctl, Hitscan's web configurator and G-Wolves' (mouse.xyz,
+//! Config/env-models.json, for the model names and cable ids).
 
 use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind, guess_kind};
-use crate::drivers::report_io::{self, Coll, Hid, device, find, products};
+use crate::drivers::hid::{self, Coll, Hid, find, products};
 
 /// Sinowealth's vendor id, used by Glorious and other brands on the same chip.
 pub const VID_SINOWEALTH: u16 = 0x258A;
 pub const VID_HITSCAN: u16 = 0x3770;
 pub const HITSCAN_PIDS: &[u16] = &[0x0136, 0x0194];
+pub const VID_GWOLVES: u16 = 0x33E4;
 pub const VID_WLMOUSE: u16 = 0x36A7;
 pub const WLMOUSE_YING_PIDS: &[u16] = &[0xA874];
 
@@ -61,6 +64,53 @@ fn hitscan_cable(pid: u16) -> bool {
     pid == 0x0136 || pid == 0x0194
 }
 
+/// G-Wolves model names; 33E4:3854 is a dongle shared by many models, so it has no specific name.
+pub fn gwolves_name(pid: u16) -> &'static str {
+    match pid {
+        0x3808 | 0x3817 => "G-Wolves HTM Plus",
+        0x6808 | 0x6817 => "G-Wolves HSK Pro 2.0",
+        0x5608 | 0x5617 | 0x5618 | 0x5619 => "G-Wolves HTXU",
+        0x3608 | 0x3617 | 0x3619 => "G-Wolves Fenrir Pro",
+        0x3908 | 0x3917 => "G-Wolves VUK",
+        0x7904 | 0x7913 => "G-Wolves HT-S2",
+        0x3708 | 0x3717 => "G-Wolves Fenrir Max",
+        0x5308 | 0x5317 => "G-Wolves HTS Ultra",
+        0x7704 | 0x7713 => "G-Wolves HTR",
+        0x3508 | 0x3517 => "G-Wolves Fenrir",
+        0x7908 | 0x7917 => "G-Wolves HT-S2 Pro",
+        0x5808 | 0x5817 => "G-Wolves HSK Pro",
+        0x2708 | 0x2717 | 0x2719 => "G-Wolves HTX Mini",
+        0x5408 | 0x5417 | 0x5418 | 0x5419 => "G-Wolves HTS Plus",
+        0x5708 | 0x5717 => "G-Wolves HTX",
+        0x5908 | 0x5917 => "G-Wolves HSK Plus",
+        0x7204 | 0x7203 => "G-Wolves HSK Lite",
+        0x7708 | 0x7717 => "G-Wolves HTR Pro",
+        0x5804 | 0x5803 => "G-Wolves HSK Pro ACE",
+        0x5404 | 0x5403 => "G-Wolves HTS Plus ACE",
+        0x5704 | 0x5703 => "G-Wolves HTX ACE",
+        0x5904 | 0x5903 => "G-Wolves HSK Plus ACE",
+        0x4718 | 0x4719 => "G-Wolves Lycan",
+        0x4219 => "G-Wolves WARG",
+        0x5219 => "G-Wolves HTS Plus Pro",
+        0x3519 => "G-Wolves Fenrir Asym",
+        0x2619 => "G-Wolves HTX Mini Asym",
+        0x1619 => "G-Wolves Fenrir Max Asym",
+        0x2119 => "G-Wolves VUK Mini",
+        _ => "G-Wolves wireless mouse",
+    }
+}
+
+/// G-Wolves' wired product ids.
+pub fn gwolves_cable(pid: u16) -> bool {
+    [
+        0x1619, 0x2119, 0x2619, 0x2708, 0x2719, 0x3508, 0x3519, 0x3608, 0x3619, 0x3708, 0x3808,
+        0x3908, 0x4219, 0x4718, 0x4719, 0x5219, 0x5308, 0x5404, 0x5408, 0x5418, 0x5419, 0x5608,
+        0x5618, 0x5619, 0x5704, 0x5708, 0x5804, 0x5808, 0x5904, 0x5908, 0x6808, 0x7204, 0x7704,
+        0x7708, 0x7904, 0x7908,
+    ]
+    .contains(&pid)
+}
+
 const VENDORS: &[Vendor] = &[
     Vendor {
         vid: VID_SINOWEALTH,
@@ -76,6 +126,14 @@ const VENDORS: &[Vendor] = &[
         reply_delay_ms: 200,
         name: hitscan_name,
         is_cable: hitscan_cable,
+        matches: |_| true,
+    },
+    Vendor {
+        vid: VID_GWOLVES,
+        key_prefix: "gwolves:",
+        reply_delay_ms: 100,
+        name: |pid| Some(gwolves_name(pid)),
+        is_cable: gwolves_cable,
         matches: |_| true,
     },
     Vendor {
@@ -137,14 +195,14 @@ fn sinowealth_kind(colls: &[Coll], vid: u16, pid: u16, name: &str) -> Kind {
     if keyboards >= 2 {
         return Kind::Keyboard;
     }
-    report_io::kind_from_colls(colls, vid, pid)
+    hid::kind_from_colls(colls, vid, pid)
 }
 
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let mut out = Vec::new();
     for v in VENDORS {
         for (vid, pid) in products(colls).into_iter().filter(|p| p.0 == v.vid) {
-            for c in find(colls, vid, pid, |c| c.feature == 65 && (v.matches)(c)) {
+            for c in find(colls, vid, pid, |c| c.feat_len == 65 && (v.matches)(c)) {
                 let Some(mut d) = hid.open(c) else { continue };
                 let mut reply = None;
                 for attempt in 0..2 {
@@ -188,7 +246,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
                         (n, k)
                     }
                 };
-                let mut s = device(
+                let mut s = Device::new(
                     format!("{}{pid:04X}", v.key_prefix),
                     name,
                     kind,
@@ -216,13 +274,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     fn reply(status: u8, charging: u8, pct: u8) -> Vec<u8> {
@@ -238,12 +296,12 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, request());
                 Some(vec![])
             }
-            Op::GetFeature(0) => q.pop_front(),
+            Op::GetFeature(0, _) => q.pop_front(),
             _ => None,
         })
     }
@@ -252,7 +310,7 @@ mod tests {
         Coll {
             vid,
             pid,
-            feature: 65,
+            feat_len: 65,
             page: 0xFFFF,
             ..Default::default()
         }
@@ -301,15 +359,38 @@ mod tests {
         assert!(poll_with(&mut fake(vec![r]), &[coll(0x258A, 0x2022)]).is_empty());
         let mut f = fake(vec![]);
         let mut short = coll(0x258A, 0x2022);
-        short.feature = 64;
+        short.feat_len = 64;
         let mut ying = coll(0x36A7, 0xA874);
         ying.usage = 1;
         assert!(poll_with(&mut f, &[short, ying]).is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
         let out = poll_with(&mut fake(vec![reply(0xA1, 0, 61)]), &[coll(0x36A7, 0xA874)]);
         assert_eq!(
             (out[0].name.as_str(), out[0].key.as_str()),
             ("WLMouse YING", "wlmouse:A874")
+        );
+    }
+
+    #[test]
+    fn g_wolves_on_this_protocol() {
+        let out = poll_with(&mut fake(vec![reply(0xA1, 0, 64)]), &[coll(0x33E4, 0x3854)]);
+        assert_eq!(
+            (
+                out[0].name.as_str(),
+                out[0].key.as_str(),
+                out[0].via.as_str()
+            ),
+            (
+                "G-Wolves wireless mouse",
+                "gwolves:3854",
+                "2.4 GHz receiver"
+            )
+        );
+        assert_eq!(out[0].percent, Some(64));
+        let out = poll_with(&mut fake(vec![reply(0xA1, 0, 80)]), &[coll(0x33E4, 0x5408)]);
+        assert_eq!(
+            (out[0].name.as_str(), out[0].via.as_str(), out[0].charging),
+            ("G-Wolves HTS Plus", "USB cable", true)
         );
     }
 }

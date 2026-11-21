@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x5253;
@@ -38,7 +38,7 @@ pub static MATCHES: &[Match] = &[
 ];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[derive(Debug, PartialEq)]
@@ -67,7 +67,7 @@ pub fn parse(r: &[u8], vid_field: u16, alt: u16) -> Option<Status> {
 
 fn poll_product(
     colls: &[Coll],
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     vid: u16,
     pid: u16,
     vid_field: u16,
@@ -77,7 +77,7 @@ fn poll_product(
     for c in find(colls, vid, pid, |c| {
         c.page == 0xFF01 && c.usage == 1 && c.feat_len >= 65
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -91,12 +91,12 @@ fn poll_product(
                 break;
             }
             if attempt > 0 {
-                io.sleep(100);
+                io.sleep(Duration::from_millis(100));
             }
             if !d.set_feature(&req) {
                 break;
             }
-            io.sleep(120);
+            io.sleep(Duration::from_millis(120));
             match d
                 .get_feature(REPORT)
                 .and_then(|r| parse(&r, vid_field, alt))
@@ -130,10 +130,10 @@ fn poll_product(
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         out.extend(poll_product(colls, io, VID, pid, VID, VID, end));
     }
     // The vid field differs between 3837 dongles: 41E4 on the A5 V2 Ultra (100C), 3837 on the K7
@@ -155,7 +155,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     /// Reply with the payload inverted, as the receiver sends it.
     fn reply(vid: u16, flags: u8, level: u8, charging: u8) -> Vec<u8> {
@@ -190,10 +190,14 @@ mod tests {
 
     #[test]
     fn receiver_and_cable_readings() {
-        let mut f = Fake::with(|s, _, _, q| {
-            assert!(q[0] == REPORT && q[1] == 0xF9 && q[2..].iter().all(|b| *b == 0xFF));
-            s.push_feature("", reply(VID, 0, 64, 1));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(q[0] == REPORT && q[1] == 0xF9 && q[2..].iter().all(|b| *b == 0xFF));
+                s.push_feature("", reply(VID, 0, 64, 1));
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let mut c = coll(VID, 0x1020, 2, 0xFF01, 1, 0, 0, 65);
         c.product = "MCHOSE L7 Ultra".into();
         let out = poll_with(&[c], &mut f);
@@ -208,15 +212,19 @@ mod tests {
 
     #[test]
     fn sleeping_mouse_is_reported_asleep() {
-        let mut f = Fake::with(|s, _, _, _| {
-            let mut echo = vec![REPORT, 0xF9];
-            echo.resize(65, 0xFF);
-            s.push_feature("", echo);
+        let mut f = Fake::with(|s, fc, op| {
+            if op.sent().is_some() {
+                let mut echo = vec![REPORT, 0xF9];
+                echo.resize(65, 0xFF);
+                s.push_feature("", echo);
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let out = poll_with(&[coll(VID_REALTEK, 0x100C, 2, 0xFF01, 1, 0, 0, 65)], &mut f);
         assert!(out[0].asleep && out[0].percent.is_none());
         assert_eq!(
-            f.s().sent.len(),
+            f.s().sends(),
             5,
             "asks five times before settling for asleep"
         );

@@ -3,8 +3,10 @@
 //! ~100 ms later GET_FEATURE 0E -> [0E][A5][command][..][01][value]. Only battery (0B, 0..20 steps of
 //! 5%) and charging (10) are read; never configuration writes.
 //!
-//! BatteryHub also ends the sleeping-device grace period at once when the USB device disappears;
-//! that needs a "disconnected" state the tracker does not have yet, so it is not ported.
+//! BatteryHub also ends the sleeping-device grace period at once when the USB device disappears
+//! (`gone.connected = false`, from the paths it read last). That is not ported: the registry does
+//! not run a driver none of whose devices is plugged in, and the protocol has no "mouse off" reply
+//! to report as `Device::off` while the receiver is present.
 //!
 //! Ported from BatteryHub (src/drivers/vaxee.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits
@@ -15,7 +17,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, device, find, products};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find, products};
 
 pub const VID: u16 = 0x3057;
 const RECEIVER: u16 = 0x1002;
@@ -55,7 +57,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             continue;
         }
         let cs = find(colls, VID, pid, |c| {
-            c.page == 0xFF05 && c.usage == 1 && c.feature == 64
+            c.page == 0xFF05 && c.usage == 1 && c.feat_len == 64
         });
         for c in cs {
             let Some(mut d) = hid.open(c) else { continue };
@@ -69,7 +71,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
                 _ => ("VAXEE wireless mouse", "2.4 GHz receiver"),
             };
             // Keyed by product id, not the HID path, which changes with the USB port.
-            let mut s = device(format!("vaxee:{pid:04X}"), name, Kind::Mouse, via);
+            let mut s = Device::new(format!("vaxee:{pid:04X}"), name, Kind::Mouse, via);
             s.percent = Some(battery * 5);
             s.grace = Duration::from_secs(30 * 60);
             if let Some(charging) = query(hid, d.as_mut(), 0x10) {
@@ -83,13 +85,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     fn coll(pid: u16) -> Coll {
@@ -98,7 +100,7 @@ mod tests {
             pid,
             page: 0xFF05,
             usage: 1,
-            feature: 64,
+            feat_len: 64,
             path: "test-receiver".into(),
             ..Default::default()
         }
@@ -112,13 +114,13 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>, send_ok: bool) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert!(w[2] == 0x0B || w[2] == 0x10);
                 assert_eq!(w, request(w[2]));
                 send_ok.then(Vec::new)
             }
-            Op::GetFeature(id) => {
+            Op::GetFeature(id, _) => {
                 assert_eq!(id, 0x0E);
                 q.pop_front()
             }
@@ -192,7 +194,7 @@ mod tests {
         let mut f = fake(vec![reply(0x0B, 10)], false);
         assert!(poll_with(&mut f, &[coll(0x1002)]).is_empty());
         let mut f = fake(vec![reply(0x0B, 10)], true);
-        f.open_ok.set(false);
+        f.s().refuse_open = true;
         assert!(poll_with(&mut f, &[coll(0x1002)]).is_empty());
         assert_eq!(f.count(|o| matches!(o, Op::SetFeature(_))), 0);
         let mut wrong_pid = coll(0x0002); // do not send VAXEE commands to other mice
@@ -202,9 +204,9 @@ mod tests {
         let mut wrong_usage = coll(0x1002);
         wrong_usage.usage = 2;
         let mut wrong_len = coll(0x1002);
-        wrong_len.feature = 63;
+        wrong_len.feat_len = 63;
         let mut f = fake(vec![], true);
         assert!(poll_with(&mut f, &[wrong_pid, wrong_page, wrong_usage, wrong_len]).is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
     }
 }

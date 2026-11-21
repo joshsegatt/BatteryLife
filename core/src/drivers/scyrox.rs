@@ -14,7 +14,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, MAX_WAIT, device, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, MAX_WAIT, find};
 
 pub const VID: u16 = 0x395A;
 pub const PID_V12M_RECEIVER: u16 = 0x0006;
@@ -80,7 +80,7 @@ fn read_battery(hid: &dyn Hid, d: &mut dyn Dev) -> Option<u8> {
 
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let cs = find(colls, VID, PID_V12M_RECEIVER, |c| {
-        c.page == 0xFF00 && c.usage == 0x0002 && c.output == 64 && c.input == 64
+        c.page == 0xFF00 && c.usage == 0x0002 && c.out_len == 64 && c.in_len == 64
     });
     for c in cs {
         let Some(mut d) = hid.open(c) else { continue };
@@ -88,7 +88,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
         let Some(pct) = read_battery(hid, d.as_mut()) else {
             continue;
         };
-        let mut s = device(
+        let mut s = Device::new(
             format!("scyrox:{PID_V12M_RECEIVER:04X}"),
             "Scyrox V12M",
             Kind::Mouse,
@@ -102,13 +102,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     fn frame(has_more: u8, profile: u8, active: u8, stages: u8, pct: u8) -> Vec<u8> {
@@ -126,7 +126,7 @@ mod tests {
     fn fake(stream: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = VecDeque::new();
         let mut stream = Some(stream);
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::Write(w) => {
                 assert_eq!(w, request());
                 q.extend(stream.take().unwrap_or_default());
@@ -147,8 +147,8 @@ mod tests {
             pid: PID_V12M_RECEIVER,
             page: 0xFF00,
             usage: 0x0002,
-            input: 64,
-            output: 64,
+            in_len: 64,
+            out_len: 64,
             ..Default::default()
         }
     }
@@ -181,9 +181,9 @@ mod tests {
         assert!(poll_with(&mut fake(vec![err]), &[coll()]).is_empty());
         assert!(poll_with(&mut fake(vec![frame(1, 1, 1, 3, 101)]), &[coll()]).is_empty());
         let mut other = coll();
-        other.output = 65;
+        other.out_len = 65;
         let mut f = fake(vec![]);
         assert!(poll_with(&mut f, &[other]).is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
     }
 }

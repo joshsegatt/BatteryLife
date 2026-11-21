@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left};
 use crate::registry::Match;
 
 const VID: u16 = 0x3837;
@@ -53,11 +53,9 @@ static KEYBOARDS: Mutex<Option<KeyboardCache>> = Mutex::new(None);
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut cache = KEYBOARDS.lock().unwrap_or_else(|e| e.into_inner());
-    poll_with(
-        &colls(infos),
-        &mut HidIo(api),
-        cache.get_or_insert_with(HashMap::new),
-    )
+    hid::run(api, infos, |hid, colls| {
+        poll_with(colls, hid, cache.get_or_insert_with(HashMap::new))
+    })
 }
 
 fn xor(b: &[u8], from: usize, to: usize) -> u8 {
@@ -109,7 +107,7 @@ pub fn parse(r: &[u8], keyboard: bool) -> Option<Info> {
 /// Up to three tries inside one shared 1 s deadline (writes, retry delays and stray reports included).
 fn query(
     d: &mut dyn Dev,
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     out_len: usize,
     keyboard: bool,
     end: Instant,
@@ -117,12 +115,12 @@ fn query(
     let deadline = end.min(Instant::now() + Duration::from_millis(1000));
     for attempt in 0..3 {
         if attempt > 0 {
-            if ms_left(deadline) <= 150 {
+            if left(deadline) <= Duration::from_millis(150) {
                 break;
             }
-            io.sleep(150);
+            io.sleep(Duration::from_millis(150));
         }
-        if ms_left(deadline) == 0 {
+        if left(deadline).is_zero() {
             break;
         }
         if !d.write(&request(out_len)) {
@@ -130,8 +128,8 @@ fn query(
         }
         let until = deadline.min(Instant::now() + Duration::from_millis(250));
         loop {
-            let left = ms_left(until);
-            if left == 0 {
+            let left = left(until);
+            if left.is_zero() {
                 break;
             }
             let Some(r) = d.read(left) else { break };
@@ -143,7 +141,7 @@ fn query(
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io, keyboards: &mut KeyboardCache) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid, keyboards: &mut KeyboardCache) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     // Forget keyboard receivers that were unplugged.
     keyboards.retain(|path, _| {
@@ -167,7 +165,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, keyboards: &mut KeyboardCache) -> 
                 out.push(s.clone());
                 break;
             }
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -215,7 +213,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, keyboards: &mut KeyboardCache) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     fn collection(pid: u16, page: u16, out_len: u16, in_len: u16) -> Coll {
         let mut c = coll(VID, pid, 2, page, 1, in_len, out_len, 0);
@@ -257,11 +255,14 @@ mod tests {
 
     /// Fake that only accepts the documented request and hands out `replies` in order.
     fn device(replies: Vec<Vec<u8>>) -> Fake {
-        let f = Fake::with(|_, _, kind, q| {
-            assert_eq!(kind, Sent::Write);
-            assert_eq!(q.len(), 64);
-            assert_eq!(q[..9], [0x4D, 1, 1, 0, 0, 9, 0, 0, 8]);
-            assert!(q[9..].iter().all(|b| *b == 0));
+        let f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::Write(_)));
+                assert_eq!(q.len(), 64);
+                assert_eq!(q[..9], [0x4D, 1, 1, 0, 0, 9, 0, 0, 8]);
+                assert!(q[9..].iter().all(|b| *b == 0));
+            }
+            fake::queued(s, fc, op)
         });
         for r in replies {
             f.s().push_input("", r);
@@ -287,7 +288,7 @@ mod tests {
         );
         assert_eq!((s.kind, s.via.as_str()), (Kind::Mouse, "2.4 GHz receiver"));
         assert_eq!(s.grace, Duration::from_secs(1800));
-        assert_eq!(f.s().sent.len(), 1, "one reply is enough, no retries");
+        assert_eq!(f.s().sends(), 1, "one reply is enough, no retries");
 
         let (out, _) = poll1(vec![reply(2, 1, 100)], collection(0x1014, 0xFF01, 64, 64));
         assert_eq!((out[0].percent, out[0].charging), (Some(100), true));
@@ -304,7 +305,7 @@ mod tests {
     fn switched_off_mouse_is_asleep() {
         let (out, f) = poll1(vec![not_linked()], collection(0x1014, 0xFF01, 64, 64));
         assert!(out[0].asleep && !out[0].charging && out[0].percent.is_none());
-        assert_eq!(f.s().sent.len(), 1);
+        assert_eq!(f.s().sends(), 1);
 
         // The 0x13 echo frame after an unrelated write carries no battery either.
         let mut echo = vec![0u8; 64];
@@ -321,7 +322,7 @@ mod tests {
     fn silence_and_corrupt_frames_report_nothing() {
         let (out, f) = poll1(vec![], collection(0x1014, 0xFF01, 64, 64));
         assert!(out.is_empty());
-        assert_eq!(f.s().sent.len(), 3);
+        assert_eq!(f.s().sends(), 3);
 
         let mut bad_checksum = reply(2, 0, 29);
         bad_checksum[24] ^= 0xFF;
@@ -336,7 +337,7 @@ mod tests {
             collection(0x1014, 0xFF01, 64, 64),
         );
         assert!(out.is_empty());
-        assert_eq!(f.s().sent.len(), 3);
+        assert_eq!(f.s().sends(), 3);
 
         // Too short for the 14-byte payload: "not linked", like the FF answer.
         let mut short = reply(2, 0, 29);
@@ -357,7 +358,7 @@ mod tests {
         ] {
             let (out, f) = poll1(vec![], c);
             assert!(out.is_empty());
-            assert_eq!(f.s().opens, 0);
+            assert_eq!(f.s().opened.len(), 0);
         }
         for pid in [0x1018, 0x102D] {
             let (out, _) = poll1(vec![reply(2, 0, 45)], collection(pid, 0xFF0B, 64, 64));
@@ -392,14 +393,14 @@ mod tests {
         let mut f = device(vec![]);
         let out = poll_with(std::slice::from_ref(&kb), &mut f, &mut cache);
         assert_eq!(out[0].percent, Some(98));
-        assert!(f.s().sent.is_empty(), "no new request within three minutes");
+        assert!(f.s().sends() == 0, "no new request within three minutes");
 
         // Unplugged: the cache is dropped, so the next poll asks again.
         poll_with(&[], &mut device(vec![]), &mut cache);
         let mut f = device(vec![not_linked()]);
         let out = poll_with(std::slice::from_ref(&kb), &mut f, &mut cache);
         assert!(out[0].asleep && out[0].percent.is_none() && !out[0].charging);
-        assert_eq!(f.s().sent.len(), 1);
+        assert_eq!(f.s().sends(), 1);
     }
 
     #[test]
@@ -428,6 +429,6 @@ mod tests {
         let mut c = kb;
         c.usage = 2;
         let (out, f) = poll1(vec![], c);
-        assert!(out.is_empty() && f.s().opens == 0);
+        assert!(out.is_empty() && f.s().opened.is_empty());
     }
 }

@@ -9,7 +9,7 @@
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x7768;
 pub const PID: u16 = 0x6434;
@@ -19,18 +19,24 @@ pub fn parse(r: &[u8]) -> Option<u8> {
     (r.len() > 13 && r[0] == 0x06 && r[1] == 0x05 && r[2] == 0x26 && r[13] <= 100).then(|| r[13])
 }
 
-fn query(io: &mut dyn Io, out_len: usize) -> Option<u8> {
+fn query(io: &mut dyn Dev, out_len: usize) -> Option<u8> {
     io.flush();
     let mut req = vec![0u8; out_len.max(2)];
     req[..2].copy_from_slice(&[0x06, 0x05]);
-    parse(&io.set_output_and_read(&req, hid_io::MAX_REPLY_MS)?)
+    if !io.set_output(&req) {
+        return None;
+    }
+    parse(&io.read(hid::MAX_WAIT)?)
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     for c in find(colls, VID, PID, |c| {
         c.page == 0xFFB2 && c.usage == 0x0001 && c.in_len == REPORT_LEN && c.out_len == REPORT_LEN
     }) {
-        let Some(pct) = open(c).and_then(|mut io| query(io.as_mut(), c.out_len.into())) else {
+        let Some(pct) = hid
+            .open(c)
+            .and_then(|mut io| query(io.as_mut(), c.out_len.into()))
+        else {
             continue;
         };
         let mut d = Device::new(
@@ -46,15 +52,14 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     // tests/pressplay_icarus_test.cpp
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn reply(level: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -64,10 +69,11 @@ mod tests {
     }
     fn run(c: Coll, reply: Option<Vec<u8>>) -> (Vec<Device>, Fake, usize) {
         let f = Fake::new();
-        f.s().output_reply = reply;
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
-        let n = opened.borrow().len();
+        if let Some(r) = reply {
+            f.queue(vec![r]);
+        }
+        let out = poll_colls(&[c], &mut f.clone());
+        let n = f.s().opened.len();
         (out, f, n)
     }
     fn collection() -> Coll {
@@ -80,7 +86,7 @@ mod tests {
             let (out, f, _) = run(collection(), Some(reply(level)));
             let mut expected = vec![0u8; 64];
             expected[..2].copy_from_slice(&[6, 5]);
-            assert_eq!(f.s().outputs, vec![expected]);
+            assert_eq!(f.s().outputs(), vec![expected]);
             if level <= 100 {
                 assert_eq!(out[0].percent, Some(level));
                 assert_eq!(out[0].kind, Kind::Mouse);

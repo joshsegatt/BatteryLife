@@ -16,9 +16,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x3837;
 const PID: u16 = 0x3033;
@@ -61,11 +59,11 @@ pub fn parse_func_config(r: &[u8]) -> Option<(u8, bool)> {
     (b & 0x7F <= 100).then_some((b & 0x7F, b & 0x80 != 0))
 }
 
-fn query(port: &mut dyn Port) -> Option<(u8, bool)> {
+fn query(port: &mut dyn Dev) -> Option<(u8, bool)> {
     port.flush();
     for attempt in 0..2 {
         if attempt > 0 {
-            port.pause(Duration::from_millis(150));
+            port.sleep(Duration::from_millis(150));
         }
         if !port.write(&REQUEST) {
             continue;
@@ -92,7 +90,7 @@ pub struct State {
     last: Option<(u8, bool)>,
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid, st: &mut State, now: Instant) -> Vec<Device> {
     let cs: Vec<&Coll> = colls
         .iter()
         .filter(|c| {
@@ -112,7 +110,7 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant
     let reading = if ask {
         st.last_ask = Some(now);
         cs.iter()
-            .find_map(|c| open(c).and_then(|mut p| query(p.as_mut())))
+            .find_map(|c| hid.open(c).and_then(|mut p| query(p.as_mut())))
     } else {
         st.last // between asks: keep showing the previous reading
     };
@@ -142,14 +140,15 @@ pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(State::default);
     let now = Instant::now();
-    poll_with(&colls(infos), &mut hid_opener(api, now + BUDGET), st, now)
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid, st, now))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{coll, per_write, script};
 
+    /// A flush drops queued replies, as on the device.
     /// A func-config reply with a correct checksum and `battery` at payload byte 32.
     fn reply(battery: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -184,61 +183,48 @@ mod tests {
     fn asks_every_ten_minutes_and_keeps_the_reading() {
         let mut st = State::default();
         let now = Instant::now();
-        let s = fake::per_write(vec![vec![reply(85)]]);
-        let out = poll_with(&[receiver()], &mut fake::opener(&s), &mut st, now);
-        assert_eq!(s.borrow().writes, vec![REQUEST.to_vec()]);
+        let s = per_write(vec![vec![reply(85)]]);
+        let out = poll_with(&[receiver()], &mut s.clone(), &mut st, now);
+        assert_eq!(s.s().writes(), vec![REQUEST.to_vec()]);
         assert_eq!(
             (out[0].name.as_str(), out[0].percent),
             ("MCHOSE G75 V2", Some(85))
         );
         assert_eq!(out[0].key, "mchose:3837:3033");
 
-        let s = fake::script();
+        let s = script();
         let out = poll_with(
             &[receiver()],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             now + Duration::from_secs(60),
         );
-        assert!(s.borrow().writes.is_empty());
+        assert!(s.s().writes().is_empty());
         assert_eq!(out[0].percent, Some(85));
 
         // Asked again later without an answer: asleep, the tracker keeps the last level.
-        let out = poll_with(
-            &[receiver()],
-            &mut fake::opener(&s),
-            &mut st,
-            now + ASK_INTERVAL,
-        );
-        assert_eq!(s.borrow().writes.len(), 2);
+        let out = poll_with(&[receiver()], &mut s.clone(), &mut st, now + ASK_INTERVAL);
+        assert_eq!(s.s().writes().len(), 2);
         assert!(out[0].asleep && out[0].percent.is_none());
     }
 
     #[test]
     fn never_answering_receiver_stays_hidden() {
         let mut st = State::default();
-        let s = fake::script();
-        assert!(
-            poll_with(
-                &[receiver()],
-                &mut fake::opener(&s),
-                &mut st,
-                Instant::now()
-            )
-            .is_empty()
-        );
+        let s = script();
+        assert!(poll_with(&[receiver()], &mut s.clone(), &mut st, Instant::now()).is_empty());
         let mut other = receiver();
         other.page = 0xFF00;
-        let s = fake::script();
+        let s = script();
         assert!(
             poll_with(
                 &[other],
-                &mut fake::opener(&s),
+                &mut s.clone(),
                 &mut State::default(),
                 Instant::now()
             )
             .is_empty()
         );
-        assert!(s.borrow().opened.is_empty());
+        assert!(s.s().opened.is_empty());
     }
 }

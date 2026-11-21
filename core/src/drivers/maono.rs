@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find, stable_key};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find, stable_key};
 
 pub const VID: u16 = 0x352F;
 pub const PID: u16 = 0x040E;
@@ -60,9 +60,9 @@ pub fn parse_battery(r: &[u8]) -> Option<u8> {
     (value <= 100).then_some(value as u8)
 }
 
-fn read_battery(io: &mut dyn Io) -> Option<u8> {
+fn read_battery(io: &mut dyn Dev) -> Option<u8> {
     // One deadline shared by sending and receiving; unrelated reports do not restart it.
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     io.flush();
     if !io.write(&request()) {
         return None;
@@ -72,7 +72,7 @@ fn read_battery(io: &mut dyn Io) -> Option<u8> {
         if left == 0 {
             break;
         }
-        let r = io.read(left)?;
+        let r = io.read(Duration::from_millis(left))?;
         if Instant::now() >= end {
             break;
         }
@@ -83,7 +83,7 @@ fn read_battery(io: &mut dyn Io) -> Option<u8> {
     None
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
     for c in find(colls, VID, PID, |c| {
         c.iface == 3
@@ -93,7 +93,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
             && c.out_len == REPORT_LEN
             && c.feat_len == 0
     }) {
-        let Some(pct) = open(c).and_then(|mut io| read_battery(io.as_mut())) else {
+        let Some(pct) = hid.open(c).and_then(|mut io| read_battery(io.as_mut())) else {
             continue;
         };
         // A microphone: BatteryLife has no microphone kind, so it is listed as "other".
@@ -107,15 +107,14 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     // tests/maono_driver_test.cpp
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn fix_checksum(r: &mut [u8]) {
         let end = usize::from(r[1]) - 2;
@@ -140,9 +139,8 @@ mod tests {
     fn run(c: Coll, replies: Vec<Vec<u8>>) -> (Vec<Device>, Fake, usize) {
         let f = Fake::new();
         f.queue(replies);
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
-        let n = opened.borrow().len();
+        let out = poll_colls(&[c], &mut f.clone());
+        let n = f.s().opened.len();
         (out, f, n)
     }
 
@@ -159,7 +157,7 @@ mod tests {
         for pct in [0, 1, 15, 64, 100] {
             let (out, f, opens) = run(collection(), vec![battery(pct, 0x0042)]);
             let s = f.s();
-            assert_eq!((opens, s.flushes, s.writes.len()), (1, 1, 1));
+            assert_eq!((opens, s.flushes(), s.writes().len()), (1, 1, 1));
             drop(s);
             let d = &out[0];
             assert_eq!(d.percent, Some(pct as u8));
@@ -169,7 +167,7 @@ mod tests {
             );
             assert_eq!((d.via.as_str(), d.charging), ("2.4 GHz receiver", false));
             assert_eq!(d.grace, Duration::ZERO);
-            assert_eq!(f.s().writes[0], request().to_vec());
+            assert_eq!(f.s().writes()[0], request().to_vec());
         }
     }
 
@@ -177,10 +175,9 @@ mod tests {
     fn mic_off_and_write_failure_list_nothing() {
         assert!(run(collection(), vec![]).0.is_empty());
         let f = Fake::new();
-        f.s().write_ok = false;
-        let opened = RefCell::new(Vec::new());
-        assert!(poll_colls(&[collection()], &mut *f.opener(&opened)).is_empty());
-        assert_eq!(f.s().reads, 0);
+        f.s().refuse_send = true;
+        assert!(poll_colls(&[collection()], &mut f.clone()).is_empty());
+        assert_eq!(f.s().reads(), 0);
     }
 
     #[test]

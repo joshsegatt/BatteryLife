@@ -2,6 +2,8 @@
 //!
 //! Wireless devices often stop answering while asleep (a Logitech receiver drops them from the link).
 //! Instead of making them vanish, the last reading stays for the device's grace period, marked asleep.
+//! A device its receiver reports switched off (`Device::off`) is different: it is hidden at once and
+//! its last reading is forgotten.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -53,6 +55,15 @@ fn estimate(samples: &mut Vec<(Instant, u8)>, d: &Device, now: Instant) -> Optio
 impl Tracker {
     /// Merges a fresh poll with remembered readings, in the order devices were first seen.
     pub fn update(&mut self, fresh: Vec<Device>, now: Instant) -> Vec<Device> {
+        // Switched off (not asleep): hidden at once, and its last reading and drain history are
+        // forgotten. A live reading of the same key in this poll (cable and receiver) wins.
+        let (off, fresh): (Vec<Device>, Vec<Device>) = fresh.into_iter().partition(|d| d.off);
+        for d in off {
+            if !fresh.iter().any(|f| f.key == d.key) {
+                self.last.remove(&d.key);
+                self.samples.remove(&d.key);
+            }
+        }
         let mut out = Vec::with_capacity(fresh.len());
         for mut d in fresh {
             match (d.percent, self.last.get(&d.key)) {
@@ -240,6 +251,64 @@ mod tests {
         let out = t.update(vec![phone], t0 + Duration::from_secs(60));
         let keys: Vec<&str> = out.iter().map(|d| d.key.as_str()).collect();
         assert_eq!(keys, ["m", "p"]);
+        assert!(out[0].asleep);
+    }
+
+    fn off(key: &str) -> Device {
+        let mut d = mouse(None);
+        d.key = key.into();
+        d.off = true;
+        d
+    }
+
+    #[test]
+    fn switched_off_device_is_hidden_at_once() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        t.update(vec![mouse(Some(80))], t0);
+        assert!(t.update(vec![off("m")], at(t0, 1)).is_empty());
+        // Its last level is forgotten, not shown asleep on the next poll.
+        assert!(t.update(vec![], at(t0, 2)).is_empty());
+        assert!(t.last.is_empty() && t.samples.is_empty() && t.order.is_empty());
+    }
+
+    #[test]
+    fn switched_off_drops_the_drain_history() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        t.update(vec![mouse(Some(80))], t0);
+        t.update(vec![mouse(Some(76))], at(t0, 30));
+        t.update(vec![off("m")], at(t0, 40));
+        // Back on: a new discharge run, no estimate from before it was switched off.
+        let out = t.update(vec![mouse(Some(75))], at(t0, 60));
+        assert_eq!((out[0].percent, out[0].minutes_left), (Some(75), None));
+    }
+
+    #[test]
+    fn live_reading_of_the_same_key_beats_off() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        let out = t.update(vec![off("m"), mouse(Some(50))], t0);
+        assert_eq!(
+            (out.len(), out[0].percent, out[0].asleep),
+            (1, Some(50), false)
+        );
+        // Still remembered: it sleeps rather than vanishes when it stops answering.
+        let out = t.update(vec![], at(t0, 1));
+        assert_eq!((out[0].percent, out[0].asleep), (Some(50), true));
+    }
+
+    #[test]
+    fn switching_off_one_device_keeps_the_others() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        let mut phone = Device::new("p", "Phone", Kind::Phone, "Phone Link");
+        phone.percent = Some(40);
+        phone.grace = Duration::from_secs(600);
+        t.update(vec![mouse(Some(80)), phone.clone()], t0);
+        let out = t.update(vec![off("p")], at(t0, 1));
+        let keys: Vec<&str> = out.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["m"]);
         assert!(out[0].asleep);
     }
 

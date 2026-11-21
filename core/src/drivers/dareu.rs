@@ -21,9 +21,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x260D;
 pub const PIDS: &[u16] = &[0x1131, 0x1148, 0x0022, 0x1090, 0x1074, 0x1125];
@@ -46,15 +44,15 @@ fn only(colls: &[Coll], pid: u16, pred: impl Fn(&Coll) -> bool) -> Option<&Coll>
 
 // --- Togran ----------------------------------------------------------------------------------
 
-fn togran_query(port: &mut dyn Port, slot: u8, len: u8, cls: u8, cmd: u8) -> Option<Vec<u8>> {
+fn togran_query(port: &mut dyn Dev, slot: u8, len: u8, cls: u8, cmd: u8) -> Option<Vec<u8>> {
     let mut req = vec![0u8; 65];
     req[..5].copy_from_slice(&[0x0A, slot << 4, len, cls, cmd]);
     if !port.set_feature(&req) {
         return None;
     }
     for _ in 0..15 {
-        port.pause(Duration::from_millis(30));
-        let r = port.get_feature(0x0A, 65).filter(|r| r.len() >= 11)?;
+        port.sleep(Duration::from_millis(30));
+        let r = port.get_feature_len(0x0A, 65).filter(|r| r.len() >= 11)?;
         if r[1] & 0x0F == 2 && r[3] == cls && r[4] == cmd {
             return Some(r);
         }
@@ -62,7 +60,7 @@ fn togran_query(port: &mut dyn Port, slot: u8, len: u8, cls: u8, cmd: u8) -> Opt
     None
 }
 
-fn togran_battery(port: &mut dyn Port, slot: u8, pid: u16, mouse_pid: u16) -> Option<Device> {
+fn togran_battery(port: &mut dyn Dev, slot: u8, pid: u16, mouse_pid: u16) -> Option<Device> {
     let b = togran_query(port, slot, 4, 0x07, 0x80)?;
     let max = if b[9] != 0 { b[9] } else { 100 };
     if b[8] > max {
@@ -88,14 +86,16 @@ fn togran_battery(port: &mut dyn Port, slot: u8, pid: u16, mouse_pid: u16) -> Op
 
 /// The receiver lists mice by slot; the A980 Pro on its cable answers on slot 0. While wired, the
 /// receiver keeps the mouse listed with status 0, so it is not shown twice.
-fn poll_togran(colls: &[Coll], open: &mut Opener, out: &mut Vec<Device>) {
+fn poll_togran(colls: &[Coll], hid: &mut dyn Hid, out: &mut Vec<Device>) {
     for pid in [0x1131u16, 0x1148] {
         let Some(c) = only(colls, pid, |c| {
             c.page == 0x000C && c.usage == 1 && c.feat_len == 65
         }) else {
             continue;
         };
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         if pid != 0x1131 {
             out.extend(togran_battery(port.as_mut(), 0, pid, pid));
             continue;
@@ -116,28 +116,28 @@ fn poll_togran(colls: &[Coll], open: &mut Opener, out: &mut Vec<Device>) {
 
 // --- A84 -------------------------------------------------------------------------------------
 
-fn poll_a84(colls: &[Coll], open: &mut Opener) -> Option<Device> {
+fn poll_a84(colls: &[Coll], hid: &mut dyn Hid) -> Option<Device> {
     let c = only(colls, 0x0022, |c| {
         c.iface == 0 && c.page == 0x01 && c.usage == 0x06 && c.feat_len == 65
     })?;
-    let mut port = open(c)?;
+    let mut port = hid.open(c)?;
     let mut req = vec![0u8; 65];
     req[1] = 0x04;
     req[2] = 0xF6;
     if !port.set_feature(&req) {
         return None;
     }
-    port.pause(Duration::from_millis(10));
+    port.sleep(Duration::from_millis(10));
     for _ in 0..3 {
-        port.get_feature(0, 65); // the official driver discards these reads
-        port.pause(Duration::from_millis(10));
+        port.get_feature_len(0, 65); // the official driver discards these reads
+        port.sleep(Duration::from_millis(10));
     }
     for i in 0..3 {
         if i > 0 {
-            port.pause(Duration::from_millis(10));
+            port.sleep(Duration::from_millis(10));
         }
         let Some(r) = port
-            .get_feature(0, 65)
+            .get_feature_len(0, 65)
             .filter(|r| r.len() >= 16 && r[15] != 0)
         else {
             continue;
@@ -167,7 +167,7 @@ pub fn em901x_reply(r: &[u8]) -> Option<(u8, bool)> {
         .then(|| (r[6], r[7] != 0))
 }
 
-fn poll_em901x(colls: &[Coll], open: &mut Opener, out: &mut Vec<Device>) {
+fn poll_em901x(colls: &[Coll], hid: &mut dyn Hid, out: &mut Vec<Device>) {
     // Prefer a cable reading over the receiver's possibly cached telemetry.
     let mut em901x_read = false;
     for pid in [0x1090u16, 0x1074, 0x1125] {
@@ -183,10 +183,10 @@ fn poll_em901x(colls: &[Coll], open: &mut Opener, out: &mut Vec<Device>) {
         let (Some(input), Some(feature)) = (input, feature) else {
             continue;
         };
-        let Some(mut input) = open(input) else {
+        let Some(mut input) = hid.open(input) else {
             continue;
         };
-        let Some(mut feature) = open(feature) else {
+        let Some(mut feature) = hid.open(feature) else {
             continue;
         };
         input.flush();
@@ -224,23 +224,26 @@ fn poll_em901x(colls: &[Coll], open: &mut Opener, out: &mut Vec<Device>) {
     }
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
-    poll_togran(colls, open, &mut out);
-    out.extend(poll_a84(colls, open));
-    poll_em901x(colls, open, &mut out);
+    poll_togran(colls, hid, &mut out);
+    out.extend(poll_a84(colls, hid));
+    poll_em901x(colls, hid, &mut out);
     out
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, at, coll};
+    use crate::drivers::hid::fake::{Fake, at, coll, feature_script, path_responder, reads};
 
+    /// After each accepted send, queues `respond(path, data)`; a flush drops queued replies.
+    /// Feature reads go to `feature(state, path, id, len)`; a flush drops queued replies.
+    /// Input and feature reports read.
     fn pair(pid: u16) -> [Coll; 2] {
         let mut input = at(coll(VID, pid, 0xFF01, 0, 17), &format!("input-{pid:04X}"));
         input.iface = 1;
@@ -258,24 +261,22 @@ mod tests {
     }
 
     /// Replies per product id, queued when the feature request reaches that product.
-    fn by_pid(table: Vec<(u16, Vec<Vec<u8>>)>) -> fake::Shared {
-        let s = fake::script();
+    fn by_pid(table: Vec<(u16, Vec<Vec<u8>>)>) -> Fake {
         let mut table = table;
-        s.borrow_mut().respond = Some(Box::new(move |path, data| {
+        path_responder(move |path, data| {
             assert_eq!(data, EM901X_REQUEST);
             table
                 .iter_mut()
                 .find(|(pid, _)| path.ends_with(&format!("{pid:04X}")))
                 .map(|(_, r)| std::mem::take(r))
                 .unwrap_or_default()
-        }));
-        s
+        })
     }
 
     #[test]
     fn em901x_receiver() {
         let s = by_pid(vec![(0x1074, vec![reply(85, 0)])]);
-        let out = poll_with(&pair(0x1074), &mut fake::opener(&s));
+        let out = poll_with(&pair(0x1074), &mut s.clone());
         let d = &out[0];
         assert_eq!(
             (d.name.as_str(), d.key.as_str()),
@@ -285,17 +286,12 @@ mod tests {
             (d.kind, d.via.as_str(), d.percent, d.charging),
             (Kind::Mouse, RECEIVER, Some(85), false)
         );
-        assert_eq!(
-            (
-                s.borrow().opened.len(),
-                s.borrow().features.len(),
-                s.borrow().reads
-            ),
-            (2, 1, 1)
-        );
+        let n = reads(&s);
+        let st = s.s();
+        assert_eq!((st.opened.len(), st.features().len(), n), (2, 1, 1));
         for percent in [0u8, 100] {
             let s = by_pid(vec![(0x1074, vec![reply(percent, 2)])]);
-            let d = &poll_with(&pair(0x1074), &mut fake::opener(&s))[0];
+            let d = &poll_with(&pair(0x1074), &mut s.clone())[0];
             assert_eq!((d.percent, d.charging), (Some(percent), true));
         }
     }
@@ -324,21 +320,21 @@ mod tests {
                 reply(42, 1),
             ],
         )]);
-        let out = poll_with(&pair(0x1074), &mut fake::opener(&s));
+        let out = poll_with(&pair(0x1074), &mut s.clone());
         assert_eq!(
-            (out[0].percent, out[0].charging, s.borrow().reads),
+            (out[0].percent, out[0].charging, reads(&s)),
             (Some(42), true, 7)
         );
 
         let s = by_pid(vec![(0x1074, vec![wrong_id, failed, reply(255, 0)])]);
-        assert!(poll_with(&pair(0x1074), &mut fake::opener(&s)).is_empty());
+        assert!(poll_with(&pair(0x1074), &mut s.clone()).is_empty());
         // Bounded under constant unrelated traffic.
         let s = by_pid(vec![(0x1074, vec![wrong_command; 33])]);
-        assert!(poll_with(&pair(0x1074), &mut fake::opener(&s)).is_empty());
-        assert_eq!(s.borrow().reads, 32);
+        assert!(poll_with(&pair(0x1074), &mut s.clone()).is_empty());
+        assert_eq!(reads(&s), 32);
         // Silence is not 0 %.
         let s = by_pid(vec![]);
-        assert!(poll_with(&pair(0x1074), &mut fake::opener(&s)).is_empty());
+        assert!(poll_with(&pair(0x1074), &mut s.clone()).is_empty());
     }
 
     #[test]
@@ -349,21 +345,21 @@ mod tests {
             (0x1090, vec![reply(85, 1)]),
             (0x1074, vec![reply(80, 0)]),
         ]);
-        let out = poll_with(&colls, &mut fake::opener(&s));
+        let out = poll_with(&colls, &mut s.clone());
         assert_eq!(out.len(), 1);
         assert_eq!(
             (out[0].via.as_str(), out[0].percent, out[0].key.as_str()),
             (CABLE, Some(85), "dareu:260D:1090")
         );
-        assert_eq!(s.borrow().features.len(), 1);
+        assert_eq!(s.s().features().len(), 1);
 
         let s = by_pid(vec![(0x1074, vec![reply(80, 0)])]);
-        let out = poll_with(&colls, &mut fake::opener(&s));
+        let out = poll_with(&colls, &mut s.clone());
         assert_eq!(
             (out.len(), out[0].via.as_str(), out[0].percent),
             (1, RECEIVER, Some(80))
         );
-        assert_eq!(s.borrow().features.len(), 2);
+        assert_eq!(s.s().features().len(), 2);
 
         let mut colls = pair(0x1125).to_vec();
         colls.extend(pair(0x1074));
@@ -371,7 +367,7 @@ mod tests {
             (0x1074, vec![reply(80, 0)]),
             (0x1125, vec![reply(64, 0)]),
         ]);
-        let out = poll_with(&colls, &mut fake::opener(&s));
+        let out = poll_with(&colls, &mut s.clone());
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].percent, out[1].percent), (Some(80), Some(64)));
         assert_eq!(out[1].name, "Sharkoon Skiller SGM50W");
@@ -397,10 +393,10 @@ mod tests {
             }
             let s = by_pid(vec![(0x1074, vec![reply(85, 0)])]);
             assert!(
-                poll_with(&colls, &mut fake::opener(&s)).is_empty(),
+                poll_with(&colls, &mut s.clone()).is_empty(),
                 "case {invalid}"
             );
-            assert!(s.borrow().opened.is_empty());
+            assert!(s.s().opened.is_empty());
         }
     }
 
@@ -408,11 +404,9 @@ mod tests {
     fn togran_receiver_lists_slots() {
         let mut c = coll(VID, 0x1131, 0x000C, 1, 0);
         c.feat_len = 65;
-        let s = fake::script();
-        let log = s.clone();
-        s.borrow_mut().feature = Some(Box::new(move |_, id, len| {
+        let s = feature_script(move |log, _, id, len| {
             assert_eq!((id, len), (0x0A, 65));
-            let last = log.borrow().features.last().cloned().unwrap();
+            let last = log.features().last().cloned().unwrap();
             let mut r = vec![0u8; 65];
             r[0] = 0x0A;
             r[1] = (last[1] & 0xF0) | 2;
@@ -428,8 +422,8 @@ mod tests {
                 r[9] = 10;
             }
             Some(r)
-        }));
-        let out = poll_with(&[c], &mut fake::opener(&s));
+        });
+        let out = poll_with(&[c], &mut s.clone());
         assert_eq!(out.len(), 1);
         let d = &out[0];
         assert_eq!(
@@ -440,8 +434,8 @@ mod tests {
             (d.percent, d.charging, d.coarse, d.via.as_str()),
             (Some(70), true, true, RECEIVER)
         );
-        assert_eq!(s.borrow().features[0][..5], [0x0A, 0x00, 6, 0x00, 0xA0]);
-        assert_eq!(s.borrow().features[1][..5], [0x0A, 0x10, 4, 0x07, 0x80]);
+        assert_eq!(s.s().features()[0][..5], [0x0A, 0x00, 6, 0x00, 0xA0]);
+        assert_eq!(s.s().features()[1][..5], [0x0A, 0x10, 4, 0x07, 0x80]);
     }
 
     #[test]
@@ -449,9 +443,8 @@ mod tests {
         let mut c = coll(VID, 0x0022, 0x01, 0x06, 0);
         c.iface = 0;
         c.feat_len = 65;
-        let s = fake::script();
         let mut n = 0;
-        s.borrow_mut().feature = Some(Box::new(move |_, id, len| {
+        let s = feature_script(move |_, _, id, len| {
             assert_eq!((id, len), (0, 65));
             n += 1;
             let mut r = vec![0u8; 65];
@@ -460,9 +453,9 @@ mod tests {
                 r[15] = 1;
             }
             Some(r)
-        }));
-        let out = poll_with(&[c], &mut fake::opener(&s));
-        assert_eq!(s.borrow().features[0][..3], [0x00, 0x04, 0xF6]);
+        });
+        let out = poll_with(&[c], &mut s.clone());
+        assert_eq!(s.s().features()[0][..3], [0x00, 0x04, 0xF6]);
         assert_eq!(
             (out[0].name.as_str(), out[0].kind, out[0].percent),
             ("DAREU A84", Kind::Keyboard, Some(66))

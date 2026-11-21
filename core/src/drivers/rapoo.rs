@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x24AE;
@@ -137,18 +137,18 @@ static HANDLES: Mutex<Option<Handles>> = Mutex::new(None);
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut handles = HANDLES.lock().unwrap_or_else(|e| e.into_inner());
-    poll_with(
-        &colls(infos),
-        &mut HidIo(api),
-        handles.get_or_insert_with(HashMap::new),
-    )
+    hid::run(api, infos, |hid, colls| {
+        poll_with(colls, hid, handles.get_or_insert_with(HashMap::new))
+    })
 }
 
 /// Reports queued since the last poll; the newest valid one wins.
 fn drain_queued(d: &mut dyn Dev, profile: Profile) -> Option<Battery> {
     let mut got = None;
     for _ in 0..64 {
-        let Some(r) = d.read(30) else { break };
+        let Some(r) = d.read(Duration::from_millis(30)) else {
+            break;
+        };
         if let Some(b) = decode(&r, profile) {
             got = Some(b);
         }
@@ -158,8 +158,8 @@ fn drain_queued(d: &mut dyn Dev, profile: Profile) -> Option<Battery> {
 
 fn wait_battery(d: &mut dyn Dev, profile: Profile, end: Instant) -> Option<Battery> {
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return None;
         }
         if let Some(b) = decode(&d.read(left)?, profile) {
@@ -172,7 +172,7 @@ fn read_battery(
     handles: &mut Handles,
     path: &str,
     c: &Coll,
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     profile: Profile,
     fresh: bool,
     end: Instant,
@@ -198,11 +198,11 @@ fn read_battery(
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io, handles: &mut Handles) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid, handles: &mut Handles) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut present: Vec<String> = Vec::new();
     let mut out: Vec<Device> = Vec::new();
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         for c in find(colls, VID, pid, |c| {
             // The other vendor collections are for configuration / firmware, not battery.
             c.page == 0xFF00
@@ -276,8 +276,12 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, handles: &mut Handles) -> Vec<Devi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::coll as fcoll;
-    use crate::drivers::hid_dev::fake::{Fake, with_path};
+    use crate::drivers::hid::fake::{Fake, iface_coll as fcoll};
+
+    fn with_path(mut c: Coll, path: &str) -> Coll {
+        c.path = path.into();
+        c
+    }
 
     // ---- rapoo_protocol_test.cpp ----
 
@@ -568,7 +572,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            f.s().opens,
+            f.s().opened.len(),
             1,
             "the 10-byte sibling is not a battery endpoint"
         );
@@ -600,14 +604,17 @@ mod tests {
                 vec![vec![0xBB, 0xB0, 0x81, 0x20, 0x03, 0x01, 45]],
             )],
         );
-        assert!(out.is_empty() && f.s().opens == 0);
+        assert!(out.is_empty() && f.s().opened.is_empty());
         let (out, _) = poll1(
             &[coll(0x1417, "receiver", 19)],
             &[("receiver", vec![vec![0xBB, 0xB0, 0x81, 0x20, 3, 2, 50]])],
         );
         assert!(out.is_empty());
         let (out, f) = poll1(&[coll(0x1414, "other-13", 13)], &[]);
-        assert!(out.is_empty() && f.s().opens == 0, "13 bytes only on 1417");
+        assert!(
+            out.is_empty() && f.s().opened.is_empty(),
+            "13 bytes only on 1417"
+        );
     }
 
     #[test]
@@ -662,14 +669,14 @@ mod tests {
         reports(&f, &[("vt9-queued", vec![frame(98), frame(97)])]);
         let out = poll_with(&cs, &mut f, &mut handles);
         assert_eq!(
-            (f.s().opens, out[0].percent),
+            (f.s().opened.len(), out[0].percent),
             (1, Some(97)),
             "newest wins, no reopen"
         );
         poll_with(&[], &mut f, &mut handles); // unplugged: the handle is dropped
         reports(&f, &[("vt9-queued", vec![frame(96)])]);
         let out = poll_with(&cs, &mut f, &mut handles);
-        assert_eq!((f.s().opens, out[0].percent), (2, Some(96)));
+        assert_eq!((f.s().opened.len(), out[0].percent), (2, Some(96)));
     }
 
     #[test]
@@ -703,6 +710,6 @@ mod tests {
             ],
             &[],
         );
-        assert!(out.is_empty() && f.s().opens == 0);
+        assert!(out.is_empty() && f.s().opened.is_empty());
     }
 }

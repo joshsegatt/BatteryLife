@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x1038;
 pub const PID: u16 = 0x2244;
@@ -65,7 +65,7 @@ impl Status {
     }
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut colls = find(colls, VID, PID, |c| {
         c.iface == 3 && (c.in_len > 0 || c.out_len > 0)
     });
@@ -75,9 +75,9 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
         p if p >= 0xFF00 => 1,
         _ => 2,
     });
-    let mut handles: Vec<(Box<dyn Io + '_>, &Coll)> = Vec::new();
+    let mut handles: Vec<(Box<dyn Dev + '_>, &Coll)> = Vec::new();
     for c in colls {
-        if let Some(mut io) = open(c) {
+        if let Some(mut io) = hid.open(c) {
             io.flush();
             handles.push((io, c));
         }
@@ -93,10 +93,10 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
         return Vec::new();
     }
     let mut st = Status::default();
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     while Instant::now() < end && (st.level.is_none() || st.power.is_none()) {
         for (io, _) in handles.iter_mut() {
-            if let Some(r) = io.read(30) {
+            if let Some(r) = io.read(Duration::from_millis(30)) {
                 st.take(&r);
             }
         }
@@ -108,14 +108,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn direct(level: u8, power: u8, charging: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -161,19 +160,17 @@ mod tests {
         ffc0.iface = 3;
         let mut other_iface = Coll::new(VID, PID, 0xFFC0, 1, 64, 64);
         other_iface.iface = 4;
-        let f = Fake::new();
-        f.replies(|w| {
+        let f = Fake::replies(|w| {
             assert_eq!(w[..2], [0x01, 0xB0]);
             assert_eq!(w.len(), 64);
             vec![direct(86, 0x00, 0x00)]
         });
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[ff00, ffc0, other_iface], &mut *f.opener(&opened));
+        let out = poll_colls(&[ff00, ffc0.clone(), other_iface], &mut f.clone());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].key, "steelseries:2244");
         assert_eq!(out[0].percent, Some(86));
-        assert_eq!(opened.borrow().len(), 2);
-        assert_eq!(opened.borrow()[0].page, 0xFFC0);
-        assert_eq!(f.s().writes.len(), 1);
+        assert_eq!(f.s().opened.len(), 2);
+        assert_eq!(f.s().opened[0], ffc0.path); // the FFC0 collection
+        assert_eq!(f.s().writes().len(), 1);
     }
 }

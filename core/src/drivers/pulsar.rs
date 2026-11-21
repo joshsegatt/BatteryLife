@@ -14,7 +14,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, device, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x3710;
 /// (pid, cable, name); dongles are named after the mouse only when it says so.
@@ -103,7 +103,7 @@ fn read_battery(hid: &mut dyn Hid, d: &mut dyn Dev) -> Read {
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let mut out = Vec::new();
     for &(pid, cable, name) in PRODUCTS {
-        let mut cs = find(colls, VID, pid, |c| c.feature >= 65);
+        let mut cs = find(colls, VID, pid, |c| c.feat_len >= 65);
         // Interface 2 rejects SET_FEATURE: try the higher interfaces first.
         cs.sort_by_key(|c| std::cmp::Reverse(c.iface));
         for c in cs {
@@ -116,7 +116,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             };
             let mut s;
             if cable {
-                s = device(format!("pulsar:{pid:04X}"), name, Kind::Mouse, "USB cable");
+                s = Device::new(format!("pulsar:{pid:04X}"), name, Kind::Mouse, "USB cable");
                 s.charging = true;
                 s.percent = pct;
             } else {
@@ -133,7 +133,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
                 } else {
                     c.product.as_str()
                 };
-                s = device(
+                s = Device::new(
                     format!("pulsar:{pid:04X}"),
                     n,
                     Kind::Mouse,
@@ -150,13 +150,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     fn reply(status: u8, pct: u8) -> Vec<u8> {
@@ -171,12 +171,12 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |c, op| match op {
+        Fake::with(move |_, c, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, request());
                 (c.iface != 2).then(Vec::new) // interface 2 rejects SET_FEATURE
             }
-            Op::GetFeature(0) => q.pop_front(),
+            Op::GetFeature(0, _) => q.pop_front(),
             _ => None,
         })
     }
@@ -186,7 +186,7 @@ mod tests {
             vid: VID,
             pid,
             iface,
-            feature: 65,
+            feat_len: 65,
             page: 0xFFFF,
             usage: 1,
             product: product.into(),
@@ -212,7 +212,7 @@ mod tests {
                 coll(0x5402, 3, "Pulsar 1K Dongle"),
             ],
         );
-        assert_eq!(f.opens.get(), 1, "interface 3 first, and it answered");
+        assert_eq!(f.s().opened.len(), 1, "interface 3 first, and it answered");
         let s = &out[0];
         assert_eq!(
             (s.name.as_str(), s.percent),

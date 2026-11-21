@@ -41,6 +41,10 @@ pub struct Device {
     /// How long the last known level stays visible after the device stops answering.
     #[serde(skip)]
     pub grace: Duration,
+    /// Its receiver says the device is switched off or out of range (BatteryHub's
+    /// `connected = false`): it is hidden at once instead of shown asleep with its last level.
+    #[serde(skip)]
+    pub off: bool,
 }
 
 impl Device {
@@ -63,7 +67,20 @@ impl Device {
             minutes_left: None,
             coarse: false,
             grace: Duration::ZERO,
+            off: false,
         }
+    }
+
+    /// The device `key` as its receiver reports it switched off or out of range.
+    pub fn switched_off(
+        key: impl Into<String>,
+        name: impl Into<String>,
+        kind: Kind,
+        via: impl Into<String>,
+    ) -> Self {
+        let mut d = Self::new(key, name, kind, via);
+        d.off = true;
+        d
     }
 }
 

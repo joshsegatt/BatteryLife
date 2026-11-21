@@ -10,14 +10,12 @@
 //! inspected there).
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, Coll, Opener, RECEIVER, RECEIVER_GRACE, colls, hid_opener, wait_for,
-};
+use crate::drivers::hid::{self, Coll, Hid, RECEIVER, RECEIVER_GRACE, read_until};
 
 pub const VID: u16 = 0x3654;
 const PID: u16 = 0x6901;
@@ -87,7 +85,7 @@ pub fn battery_reply(r: &[u8], seq: u8) -> Option<(u8, bool)> {
     value.map(|v| (v & 0x7F, v & 0x80 != 0))
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener, seq: u8) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid, seq: u8) -> Vec<Device> {
     for c in colls.iter().filter(|c| {
         c.is(VID, PID)
             && c.iface == 3
@@ -96,13 +94,15 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener, seq: u8) -> Vec<Device> {
             && c.in_len == 65
             && c.out_len == 65
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         port.flush();
         if !port.write(&battery_request(seq)) {
             continue;
         }
         // The receiver first sends several startup notifications; the reply was measured at ~406 ms.
-        let Some(r) = wait_for(port.as_mut(), Duration::from_millis(800), |r| {
+        let Some(r) = read_until(port.as_mut(), Duration::from_millis(800), |r| {
             battery_reply(r, seq).is_some()
         }) else {
             continue;
@@ -122,17 +122,13 @@ static SEQ: AtomicU8 = AtomicU8::new(0);
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let seq = SEQ.load(Ordering::Relaxed) % 15 + 1;
     SEQ.store(seq, Ordering::Relaxed);
-    poll_with(
-        &colls(infos),
-        &mut hid_opener(api, Instant::now() + BUDGET),
-        seq,
-    )
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid, seq))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, per_write};
 
     fn seal(r: &mut [u8]) {
         let end = 9 + usize::from(r[7]);
@@ -153,9 +149,9 @@ mod tests {
         c
     }
 
-    fn run(seq: u8, replies: Vec<Vec<u8>>, c: Coll) -> (Vec<Device>, fake::Shared) {
-        let s = fake::per_write(vec![replies]);
-        (poll_with(&[c], &mut fake::opener(&s), seq), s)
+    fn run(seq: u8, replies: Vec<Vec<u8>>, c: Coll) -> (Vec<Device>, Fake) {
+        let s = per_write(vec![replies]);
+        (poll_with(&[c], &mut s.clone(), seq), s)
     }
 
     #[test]
@@ -164,7 +160,7 @@ mod tests {
         let r = reply(3, 40);
         assert_eq!(r[12..14], [0x96, 0x0D]);
         let (out, s) = run(3, vec![r], receiver());
-        let w = &s.borrow().writes[0];
+        let w = &s.s().writes()[0];
         assert_eq!((w.len(), w[0], w[1], w[2]), (14, 0, 0xFE, 3));
         assert_eq!(w[3..12], [0x10, 0, 1, 0, 1, 2, 0, 1, 0]);
         assert_eq!(crc(&w[1..12]), u16::from_be_bytes([w[12], w[13]]));
@@ -218,7 +214,7 @@ mod tests {
                 _ => c.out_len -= 1,
             }
             let (out, s) = run(1, vec![reply(1, 40)], c);
-            assert!(out.is_empty() && s.borrow().opened.is_empty());
+            assert!(out.is_empty() && s.s().opened.is_empty());
         }
     }
 }

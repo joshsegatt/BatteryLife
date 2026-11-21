@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind, interpolate};
-use crate::drivers::hid_io::{self, Coll, Io, Open, Outcome, find, query};
+use crate::drivers::hid::{self, Coll, Dev, Hid, Outcome, find, query};
 
 pub const VID_HP: u16 = 0x03F0;
 pub const VID_KINGSTON: u16 = 0x0951;
-const REPLY_MS: u64 = hid_io::MAX_REPLY_MS;
+const REPLY: Duration = hid::MAX_WAIT;
 
 /// The Haste 2 reports about 40% for a few seconds after power-on; readings closer than this to the
 /// link coming up are not trusted.
@@ -43,24 +43,24 @@ fn base(pid: u16, name: &str) -> Device {
 }
 
 /// Cloud III Wireless: report 66 <cmd>; 82 -> [2] connected, 8A -> [2] charging, 89 -> [2..3] mV, [4] %.
-fn cloud3(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn cloud3(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let mut q = |cmd: u8| {
-        query(io, &[0x66, cmd], REPLY_MS, |r| {
+        query(io, &[0x66, cmd], REPLY, |r| {
             r.len() >= 5 && r[0] == 0x66 && r[1] == cmd
         })
     };
     let Some(r) = q(0x82) else {
         return Outcome::NoAnswer;
     };
-    if r[2] == 0 {
-        return Outcome::Off;
-    }
     let name = if matches!(c.pid, 0x069F | 0x0995) {
         "HyperX Cloud II Core Wireless"
     } else {
         "HyperX Cloud III Wireless"
     };
     let mut d = base(c.pid, name);
+    if r[2] == 0 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = q(0x8A) {
         d.charging = r[2] == 1;
     }
@@ -72,9 +72,9 @@ fn cloud3(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
 }
 
 /// Cloud II Wireless (HP): report 06 FF BB <cmd>; 02 -> [7] %, 03 -> [4] charging.
-fn cloud2(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn cloud2(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let mut q = |cmd: u8| {
-        query(io, &[0x06, 0xFF, 0xBB, cmd], REPLY_MS, |r| {
+        query(io, &[0x06, 0xFF, 0xBB, cmd], REPLY, |r| {
             r.len() >= 8 && r[..4] == [0x06, 0xFF, 0xBB, cmd]
         })
     };
@@ -92,13 +92,13 @@ fn cloud2(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
 
 /// Cloud II Wireless (Kingston 0951:1718) and Cloud Flight S (0951:16EA/16EB): fixed 17-byte request,
 /// reply 0B 00 BB <cmd>; 02 -> [7] %, 03 -> [4] charging.
-fn cloud2_kingston(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn cloud2_kingston(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let mut q = |cmd: u8| {
         let req = [
             0x06, 0x00, 0x02, 0x00, 0x9A, 0x00, 0x00, 0x68, 0x4A, 0x8E, 0x0A, 0x00, 0x00, 0x00,
             0xBB, cmd, 0x00,
         ];
-        query(io, &req, REPLY_MS, |r| {
+        query(io, &req, REPLY, |r| {
             r.len() >= 8 && r[0] == 0x0B && r[2] == 0xBB && r[3] == cmd
         })
     };
@@ -119,19 +119,19 @@ fn cloud2_kingston(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
 }
 
 /// Cloud Alpha Wireless: 21 BB <cmd>; 03 -> [3]==1 offline, 0C -> [3]==1 charging, 0B -> [3] %.
-fn cloud_alpha(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn cloud_alpha(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let mut q = |cmd: u8| {
-        query(io, &[0x21, 0xBB, cmd], REPLY_MS, |r| {
+        query(io, &[0x21, 0xBB, cmd], REPLY, |r| {
             r.len() >= 4 && r[0] == 0x21 && r[2] == cmd
         })
     };
     let Some(r) = q(0x03) else {
         return Outcome::NoAnswer;
     };
-    if r[3] == 0x01 {
-        return Outcome::Off;
-    }
     let mut d = base(c.pid, "HyperX Cloud Alpha Wireless");
+    if r[3] == 0x01 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = q(0x0C) {
         d.charging = r[3] == 0x01;
     }
@@ -142,21 +142,21 @@ fn cloud_alpha(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
 }
 
 /// [cmd][sub] request, reply [cmd+1][sub]..; used by Cloud Alpha 2 and the Haste 2.
-fn alpha2_query(io: &mut dyn Io, cmd: u8, sub: u8) -> Option<Vec<u8>> {
-    query(io, &[cmd, sub], REPLY_MS, |r| {
+fn alpha2_query(io: &mut dyn Dev, cmd: u8, sub: u8) -> Option<Vec<u8>> {
+    query(io, &[cmd, sub], REPLY, |r| {
         r.len() >= 8 && r[0] == cmd.wrapping_add(1) && r[1] == sub
     })
 }
 
 /// Cloud Alpha 2 Wireless: 52 01 -> [2] connected, 50 02 -> [2] %, [3] charging, [6..7] mV (LE).
-fn cloud_alpha2(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn cloud_alpha2(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let Some(r) = alpha2_query(io, 0x52, 0x01) else {
         return Outcome::NoAnswer;
     };
-    if r[2] == 0 {
-        return Outcome::Off;
-    }
     let mut d = base(c.pid, "HyperX Cloud Alpha 2 Wireless");
+    if r[2] == 0 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = alpha2_query(io, 0x50, 0x02).filter(|r| r[2] <= 100) {
         d.percent = Some(r[2]);
         d.charging = r[3] == 0x01;
@@ -168,7 +168,7 @@ fn cloud_alpha2(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
 /// Pulsefire Haste 2 (Core / Mini) Wireless: NGENUITY's battery query, the same 52 01 / 50 02 pair as
 /// Cloud Alpha 2. After a reconnect the link reply can be lost in unrelated reports, so a missing link
 /// reply is not an error: the battery query decides.
-fn haste(io: &mut dyn Io, c: &Coll, st: &mut State) -> Outcome {
+fn haste(io: &mut dyn Dev, c: &Coll, st: &mut State) -> Outcome {
     let link = alpha2_query(io, 0x52, 0x01);
     let linked = link.as_ref().is_none_or(|r| r[2] != 0);
     let battery = if linked {
@@ -192,13 +192,6 @@ fn haste(io: &mut dyn Io, c: &Coll, st: &mut State) -> Outcome {
         });
     }
     st.haste_polled = true;
-    if !linked {
-        return Outcome::Off;
-    }
-    let settled = st
-        .haste_link_up
-        .is_some_and(|t| now.duration_since(t) >= HASTE_SETTLE);
-
     let name = match c.pid {
         0x0AB5 => "HyperX Pulsefire Haste 2 Core Wireless",
         0x0DA0 => "HyperX Pulsefire Haste 2 Mini",
@@ -208,6 +201,13 @@ fn haste(io: &mut dyn Io, c: &Coll, st: &mut State) -> Outcome {
     d.kind = Kind::Mouse;
     // An unsettled (or missing) reading stays unknown, so the last level is kept meanwhile.
     d.grace = Duration::from_secs(60);
+    if !linked {
+        return Outcome::Off(d);
+    }
+    let settled = st
+        .haste_link_up
+        .is_some_and(|t| now.duration_since(t) >= HASTE_SETTLE);
+
     if let Some(r) = battery.filter(|_| settled) {
         d.percent = Some(r[2]);
         d.charging = r[3] == 0x01 || r[3] == 0x02;
@@ -233,8 +233,8 @@ pub fn cloud_flight_percent(mv: i32) -> u8 {
 }
 
 /// Cloud Flight: 21 FF 05 -> [3..4] mV (above 0x100B means charging).
-fn cloud_flight(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
-    let Some(r) = query(io, &[0x21, 0xFF, 0x05], REPLY_MS, |r| r.len() >= 5) else {
+fn cloud_flight(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
+    let Some(r) = query(io, &[0x21, 0xFF, 0x05], REPLY, |r| r.len() >= 5) else {
         return Outcome::NoAnswer;
     };
     let mv = u16::from_be_bytes([r[3], r[4]]);
@@ -250,19 +250,19 @@ fn cloud_flight(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
 
 /// Cloud III S Wireless: report 0C [02 03 01 00 <cmd>]; reply [5] = cmd, [6] = value (FF = invalid).
 /// 02 -> [6] == 2 connected, 06 -> [6] %, 48 -> [6] 0 discharging / 1 charging / 2 full.
-fn cloud3s(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn cloud3s(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let mut q = |cmd: u8| {
-        query(io, &[0x0C, 0x02, 0x03, 0x01, 0x00, cmd], REPLY_MS, |r| {
+        query(io, &[0x0C, 0x02, 0x03, 0x01, 0x00, cmd], REPLY, |r| {
             r.len() >= 7 && r[0] == 0x0C && r[5] == cmd && r[6] != 0xFF
         })
     };
     let Some(r) = q(0x02) else {
         return Outcome::NoAnswer;
     };
-    if r[6] != 2 {
-        return Outcome::Off;
-    }
     let mut d = base(c.pid, "HyperX Cloud III S Wireless");
+    if r[6] != 2 {
+        return Outcome::Off(d);
+    }
     if let Some(r) = q(0x06).filter(|r| r[6] <= 100) {
         d.percent = Some(r[6]);
     }
@@ -296,7 +296,7 @@ pub fn stinger_percent(mv: i32, charging: bool) -> u8 {
 /// GetFeature(FF). Connection reply [11] == 1 = headset on; battery reply [9] = 03 discharging /
 /// 05 charging / 06 full, [11..12] = mV (LE). The PlayStation and DTS receivers can hand back a
 /// previous report, so their reply is read again (up to 10 x 20 ms) until it looks right.
-fn stinger_core(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
+fn stinger_core(io: &mut dyn Dev, c: &Coll, _: &mut State) -> Outcome {
     let ps = matches!(c.pid, 0x0A93 | 0x1713 | 0x173F | 0x0A8E);
     // (whether a reply was accepted, the last reply read)
     let mut exchange = |cmd: &[u8], good: fn(&[u8]) -> bool| -> (bool, Option<Vec<u8>>) {
@@ -305,7 +305,7 @@ fn stinger_core(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
         }
         let mut last = None;
         for _ in 0..(if ps { 10 } else { 1 }) {
-            io.sleep(20);
+            io.sleep(Duration::from_millis(20));
             match io.get_feature(0xFF) {
                 Some(r) if r.len() >= 13 => {
                     let ok = !ps || good(&r);
@@ -328,15 +328,15 @@ fn stinger_core(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
         (false, Some(r)) if ps && !fresh(&r) => r,
         _ => return Outcome::NoAnswer,
     };
-    if r[11] != 0x01 {
-        return Outcome::Off;
-    }
     let name = match c.pid {
         0x173F => "HyperX Cloud Core Wireless",
         0x0A8E => "HyperX Cloud Stinger Core Wireless DTS",
         _ => "HyperX Cloud Stinger Core Wireless",
     };
     let mut d = base(c.pid, name);
+    if r[11] != 0x01 {
+        return Outcome::Off(d);
+    }
     if let (true, Some(r)) = exchange(&STINGER_BATTERY, battery)
         && matches!(r[9], 0x03 | 0x05 | 0x06)
     {
@@ -352,7 +352,7 @@ fn stinger_core(io: &mut dyn Io, c: &Coll, _: &mut State) -> Outcome {
     Outcome::Found(d)
 }
 
-type Reader = fn(&mut dyn Io, &Coll, &mut State) -> Outcome;
+type Reader = fn(&mut dyn Dev, &Coll, &mut State) -> Outcome;
 
 struct Model {
     vid: u16,
@@ -454,12 +454,12 @@ pub const KINGSTON_PIDS: &[u16] = &[
     0x1718, 0x16EA, 0x16EB, 0x16C4, 0x1723, 0x1749, 0x170B, 0x1713, 0x173F,
 ];
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid, st: &mut State) -> Vec<Device> {
     let mut out = Vec::new();
     for m in MODELS {
         for &pid in m.pids {
             for c in find(colls, m.vid, pid, m.accept) {
-                let Some(mut io) = open(c) else { continue };
+                let Some(mut io) = hid.open(c) else { continue };
                 if (m.read)(io.as_mut(), c, st).settle(&mut out) {
                     break;
                 }
@@ -472,19 +472,17 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(State::default);
-    hid_io::run(api, infos, |colls, open| poll_colls(colls, open, st))
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid, st))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op, queued};
 
     fn run(colls: &[Coll], fake: &Fake, st: &mut State) -> (Vec<Device>, usize) {
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(colls, &mut *fake.opener(&opened), st);
-        let n = opened.borrow().len();
+        let out = poll_colls(colls, &mut fake.clone(), st);
+        let n = fake.s().opened.len();
         (out, n)
     }
 
@@ -507,22 +505,20 @@ mod tests {
 
     /// Answers each 17-byte request by its command byte (r[15]).
     fn kingston(script: Vec<(u8, Vec<Vec<u8>>)>) -> Fake {
-        let f = Fake::new();
-        f.replies(move |w| {
+        Fake::replies(move |w| {
             assert!(w.len() == 17 && w[14] == 0xBB);
             script
                 .iter()
                 .find(|(cmd, _)| *cmd == w[15])
                 .map(|(_, r)| r.clone())
                 .unwrap_or_default()
-        });
-        f
+        })
     }
 
     fn check_requests(f: &Fake) {
         let s = f.s();
-        assert_eq!(s.writes.len(), 2);
-        for (i, w) in s.writes.iter().enumerate() {
+        assert_eq!(s.writes().len(), 2);
+        for (i, w) in s.writes().iter().enumerate() {
             assert_eq!(
                 w[..15],
                 [
@@ -605,7 +601,7 @@ mod tests {
         let f = kingston(vec![]);
         let (out, _) = run(&[flight_s(0x16EA)], &f, &mut State::default());
         assert!(out.is_empty());
-        assert_eq!(f.s().writes.len(), 1);
+        assert_eq!(f.s().writes().len(), 1);
         for bad in [
             kingston_reply(0x02, 101, true),
             kingston_reply(0x02, 80, false),
@@ -633,7 +629,7 @@ mod tests {
         ] {
             let f = kingston(device(83, 0));
             let (out, opens) = run(&[c], &f, &mut State::default());
-            assert!(out.is_empty() && opens == 0 && f.s().writes.is_empty());
+            assert!(out.is_empty() && opens == 0 && f.s().writes().is_empty());
         }
         // Kingston Cloud II Wireless keeps the same protocol, on any page.
         let f = kingston(device(76, 0));
@@ -667,8 +663,7 @@ mod tests {
 
     /// The dongle floods unrelated reports before each reply.
     fn dongle(link: Option<Vec<u8>>, battery: Vec<u8>) -> Fake {
-        let f = Fake::new();
-        f.replies(move |w| {
+        Fake::replies(move |w| {
             assert_eq!(w.len(), 2);
             match (w[0], w[1]) {
                 (0x52, 0x01) => {
@@ -679,8 +674,7 @@ mod tests {
                 (0x50, 0x02) => vec![report(0xFB, 0x01, &[(2, 1)]), battery.clone()],
                 _ => vec![],
             }
-        });
-        f
+        })
     }
 
     const ASK_LINK: [u8; 2] = [0x52, 0x01];
@@ -692,7 +686,10 @@ mod tests {
         let mut st = State::default();
         let f = dongle(Some(link(1)), battery(70, 0));
         let (out, _) = run(std::slice::from_ref(&core), &f, &mut st);
-        assert_eq!(f.s().writes, vec![ASK_LINK.to_vec(), ASK_BATTERY.to_vec()]);
+        assert_eq!(
+            f.s().writes(),
+            vec![ASK_LINK.to_vec(), ASK_BATTERY.to_vec()]
+        );
         let d = &out[0];
         assert_eq!(d.key, "hyperx:0AB5");
         assert_eq!(d.name, "HyperX Pulsefire Haste 2 Core Wireless");
@@ -722,7 +719,10 @@ mod tests {
         let mut st = State::default();
         let f = dongle(None, battery(70, 0));
         let (out, _) = run(std::slice::from_ref(&core), &f, &mut st);
-        assert_eq!(f.s().writes, vec![ASK_LINK.to_vec(), ASK_BATTERY.to_vec()]);
+        assert_eq!(
+            f.s().writes(),
+            vec![ASK_LINK.to_vec(), ASK_BATTERY.to_vec()]
+        );
         assert_eq!(out[0].percent, Some(70));
 
         let f = dongle(Some(link(1)), battery(101, 0));
@@ -754,7 +754,7 @@ mod tests {
         ] {
             let f = dongle(Some(link(1)), battery(70, 0));
             let (out, opens) = run(&[c], &f, &mut st);
-            assert!(out.is_empty() && opens == 0 && f.s().writes.is_empty());
+            assert!(out.is_empty() && opens == 0 && f.s().writes().is_empty());
         }
     }
 
@@ -762,15 +762,17 @@ mod tests {
     fn haste_link_down_then_settle_window() {
         let core = haste_coll(0x0AB5, 0xFF00);
         let mut st = State::default();
-        // Link down: nothing listed and no battery query sent.
+        // Link down: listed as switched off and no battery query sent.
         let f = dongle(Some(link(0)), battery(70, 0));
         let (out, _) = run(std::slice::from_ref(&core), &f, &mut st);
-        assert_eq!(f.s().writes, vec![ASK_LINK.to_vec()]);
-        assert!(out.is_empty());
+        assert_eq!(f.s().writes(), vec![ASK_LINK.to_vec()]);
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, "hyperx:0AB5");
         // Link up right after: the power-on reading stays unknown.
         let f = dongle(Some(link(1)), battery(40, 0));
         let (out, _) = run(std::slice::from_ref(&core), &f, &mut st);
-        assert_eq!((out.len(), out[0].percent), (1, None));
+        assert_eq!((out.len(), out[0].percent, out[0].off), (1, None, false));
+        assert_eq!(out[0].key, "hyperx:0AB5");
     }
 
     // ---- Stinger Core (tests/hyperx_stinger_driver_test.cpp) ----
@@ -798,16 +800,19 @@ mod tests {
         stinger_reply(0x12, 5, code, mv)
     }
     fn stinger(links: Vec<Vec<u8>>, batteries: Vec<Vec<u8>>) -> Fake {
-        let f = Fake::new();
-        f.s().on_set_feature = Some(Box::new(move |w| {
-            assert!(w == STINGER_CONNECTION || w == STINGER_BATTERY);
-            if w == STINGER_CONNECTION {
-                links.clone()
-            } else {
-                batteries.clone()
+        // Each feature report sent replaces the replies GetFeature returns.
+        Fake::with(move |s, c, op| {
+            if let Op::SetFeature(w) = op {
+                assert!(w[..] == STINGER_CONNECTION || w[..] == STINGER_BATTERY);
+                let r = if w[..] == STINGER_CONNECTION {
+                    links.clone()
+                } else {
+                    batteries.clone()
+                };
+                s.feature.insert(String::new(), r.into());
             }
-        }));
-        f
+            queued(s, c, op)
+        })
     }
 
     #[test]
@@ -826,7 +831,7 @@ mod tests {
             (Kind::Headset, false, Some(80), Some(3954))
         );
         let s = f.s();
-        assert_eq!((s.set_features.len(), s.feature_reads), (2, 12));
+        assert_eq!((s.features().len(), s.feature_reads()), (2, 12));
         drop(s);
 
         let f = stinger(vec![stinger_link(true)], vec![stinger_battery(5, 4050)]);
@@ -836,17 +841,15 @@ mod tests {
         let out = run(std::slice::from_ref(&dts), &f, &mut State::default()).0;
         assert_eq!((out[0].charging, out[0].percent), (false, Some(100)));
 
-        // Headset off: nothing listed, no battery request.
+        // Headset off: listed as switched off under the same key, no battery request.
         let f = stinger(
             vec![stinger_link(false); 10],
             vec![stinger_battery(3, 3954)],
         );
-        assert!(
-            run(std::slice::from_ref(&dts), &f, &mut State::default())
-                .0
-                .is_empty()
-        );
-        assert_eq!(f.s().set_features.len(), 1);
+        let out = run(std::slice::from_ref(&dts), &f, &mut State::default()).0;
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(out[0].key, format!("hyperx:{:04X}", dts.pid));
+        assert_eq!(f.s().features().len(), 1);
     }
 
     #[test]
@@ -865,7 +868,7 @@ mod tests {
                 (out.len(), out[0].percent, out[0].millivolts),
                 (1, None, None)
             );
-            assert!(f.s().feature_reads <= 12);
+            assert!(f.s().feature_reads() <= 12);
         }
         let f = stinger(vec![], vec![]);
         assert!(
@@ -906,7 +909,7 @@ mod tests {
             &mut State::default(),
         )
         .0;
-        assert_eq!((out[0].percent, f.s().feature_reads), (Some(80), 2));
+        assert_eq!((out[0].percent, f.s().feature_reads()), (Some(80), 2));
         for (vid, pid) in [(VID_HP, 0x0A93), (VID_KINGSTON, 0x1713)] {
             let f = stinger(
                 vec![stinger_link(true)],
@@ -921,8 +924,7 @@ mod tests {
     #[test]
     fn cloud3_and_flight_curves() {
         // Cloud III: connected, charging, 3900 mV / 77 %.
-        let f = Fake::new();
-        f.replies(|w| match w[1] {
+        let f = Fake::replies(|w| match w[1] {
             0x82 => vec![vec![0x66, 0x82, 1, 0, 0]],
             0x8A => vec![vec![0x66, 0x8A, 1, 0, 0]],
             0x89 => vec![vec![0x66, 0x89, 0x0F, 0x3C, 77]],

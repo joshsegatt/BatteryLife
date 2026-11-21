@@ -18,7 +18,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, device, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x3367;
 pub const PID_DONGLE_4K: u16 = 0x1970;
@@ -70,7 +70,7 @@ static LAST_NAME: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None
 
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let cs = find(colls, VID, PID_DONGLE_4K, |c| {
-        c.page == 0xFF01 && c.usage == 0x0002 && c.feature >= 64
+        c.page == 0xFF01 && c.usage == 0x0002 && c.feat_len >= 64
     });
     for c in cs {
         let Some(mut d) = hid.open(c) else { continue };
@@ -87,7 +87,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
         if !awake && !asleep {
             continue;
         }
-        let mut s = device(
+        let mut s = Device::new(
             format!("endgame:{PID_DONGLE_4K:04X}"),
             "",
             Kind::Mouse,
@@ -118,13 +118,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
 
     fn coll(path: &str) -> Coll {
         Coll {
@@ -132,7 +132,7 @@ mod tests {
             pid: PID_DONGLE_4K,
             page: 0xFF01,
             usage: 0x0002,
-            feature: 64,
+            feat_len: 64,
             path: path.into(),
             ..Default::default()
         }
@@ -148,22 +148,22 @@ mod tests {
     }
 
     /// Answers each command with `answer(cmd)`; records the commands sent.
-    fn dongle(answer: impl Fn(u8) -> Vec<u8> + 'static) -> Fake {
+    fn dongle(answer: impl Fn(u8) -> Vec<u8> + Send + 'static) -> Fake {
         let mut last = 0u8;
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert!(matches!(w[1], 0xB4 | 0x0E | 0x0F), "read commands only");
                 last = w[1];
                 Some(vec![])
             }
-            Op::GetFeature(0xA1) => Some(answer(last)),
+            Op::GetFeature(0xA1, _) => Some(answer(last)),
             _ => None,
         })
     }
 
     fn sent(f: &Fake) -> Vec<u8> {
-        f.log
-            .borrow()
+        f.s()
+            .log
             .iter()
             .filter_map(|(_, o)| match o {
                 Op::SetFeature(w) => Some(w[1]),

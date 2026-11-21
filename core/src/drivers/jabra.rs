@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find, products};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find, pids};
 
 pub const VID: u16 = 0x0B0E;
 const DONGLE_HEADSET: u8 = 0x04;
@@ -92,20 +92,20 @@ pub fn parse_reply(r: &[u8], dst: u8, seq: u8, cls: u8, op: u8) -> Option<Reply>
     Some(Reply::Ok(r[7..=len].to_vec()))
 }
 
-fn query(io: &mut dyn Io, st: &mut State, dst: u8, cls: u8, op: u8, timeout_ms: u64) -> Reply {
+fn query(io: &mut dyn Dev, st: &mut State, dst: u8, cls: u8, op: u8, timeout: Duration) -> Reply {
     let seq = st.seq;
     st.seq = st.seq.wrapping_add(1);
     io.flush();
     if !io.write(&[0x05, dst, 0x00, seq, 0x46, cls, op]) {
         return Reply::None;
     }
-    let end = Instant::now() + Duration::from_millis(timeout_ms);
+    let end = Instant::now() + timeout;
     loop {
         let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
         if left == 0 {
             return Reply::None;
         }
-        let Some(r) = io.read(left) else {
+        let Some(r) = io.read(Duration::from_millis(left)) else {
             return Reply::None;
         };
         if let Some(reply) = parse_reply(&r, dst, seq, cls, op) {
@@ -114,8 +114,8 @@ fn query(io: &mut dyn Io, st: &mut State, dst: u8, cls: u8, op: u8, timeout_ms: 
     }
 }
 
-fn headset_name(io: &mut dyn Io, st: &mut State, address: u8) -> Option<String> {
-    let Reply::Ok(p) = query(io, st, address, 0x02, 0x00, 400) else {
+fn headset_name(io: &mut dyn Dev, st: &mut State, address: u8) -> Option<String> {
+    let Reply::Ok(p) = query(io, st, address, 0x02, 0x00, Duration::from_millis(400)) else {
         return None;
     };
     let n = usize::from(*p.first()?);
@@ -125,10 +125,11 @@ fn headset_name(io: &mut dyn Io, st: &mut State, address: u8) -> Option<String> 
     Some(String::from_utf8_lossy(&p[1..=n]).into_owned())
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid, st: &mut State) -> Vec<Device> {
     let now = Instant::now();
     let mut out = Vec::new();
-    for (vid, pid) in products(colls, VID) {
+    for pid in pids(colls, VID) {
+        let vid = VID;
         if DECT_BASES.binary_search(&pid).is_ok() {
             continue;
         }
@@ -149,7 +150,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
         // every reply was a NAK. Dongles and known addresses are never skipped.
         let (mut reported, mut probed, mut skippable, mut all_nak) = (false, false, true, true);
         for c in found {
-            let Some(mut io) = open(c) else { continue };
+            let Some(mut io) = hid.open(c) else { continue };
             let io = io.as_mut();
             let known = get(&st.addresses, pid);
             let dongle = known.map_or_else(|| c.product.contains("Link"), |a| a == DONGLE_HEADSET);
@@ -163,7 +164,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
             }
             let mut answer = None; // (address, battery payload; None = headset offline)
             for a in order {
-                match query(io, st, a, 0x12, 0x02, hid_io::MAX_REPLY_MS) {
+                match query(io, st, a, 0x12, 0x02, hid::MAX_WAIT) {
                     Reply::Ok(p) if p.len() >= 2 => {
                         answer = Some((a, Some(p)));
                         break;
@@ -187,21 +188,29 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
             };
             set(&mut st.addresses, pid, address);
             reported = true;
+            let via = if address == DONGLE_HEADSET {
+                "Jabra Link dongle"
+            } else {
+                "USB cable"
+            };
             let Some(p) = battery else {
-                // Dongle present, headset off or out of range: not listed; the name is asked again
-                // when it is back, so a newly paired headset is picked up.
+                // Dongle present, headset off or out of range: listed switched off under the name
+                // it had; the name is asked again when it is back, so a newly paired headset is
+                // picked up.
+                let name = get(&st.names, pid).unwrap_or_else(|| "Jabra headset".into());
                 st.names.retain(|(q, _)| *q != pid);
+                out.push(Device::switched_off(
+                    format!("jabra:{pid:04X}"),
+                    name,
+                    Kind::Headset,
+                    via,
+                ));
                 break;
             };
             if get(&st.names, pid).is_none() {
                 let name = headset_name(io, st, address).unwrap_or_else(|| "Jabra headset".into());
                 set(&mut st.names, pid, name);
             }
-            let via = if address == DONGLE_HEADSET {
-                "Jabra Link dongle"
-            } else {
-                "USB cable"
-            };
             let name = get(&st.names, pid).unwrap_or_default();
             let mut d = Device::new(format!("jabra:{pid:04X}"), name, Kind::Headset, via);
             d.percent = (p[1] <= 100).then_some(p[1]);
@@ -219,16 +228,15 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(State::default);
-    hid_io::run(api, infos, |colls, open| poll_colls(colls, open, st))
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid, st))
 }
 
 #[cfg(test)]
 mod tests {
     // tests/jabra_driver_test.cpp
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
+    use crate::drivers::hid::fake::{Fake, Op, queued};
     use std::cell::RefCell;
-    use std::ffi::CString;
     use std::rc::Rc;
 
     #[derive(Clone)]
@@ -261,7 +269,7 @@ mod tests {
     fn coll(pid: u16, usage: u16, path: &str, product: &str) -> Coll {
         let mut c = Coll::new(VID, pid, 0xFF00, usage, 64, 64);
         c.iface = 3;
-        c.path = CString::new(path).unwrap();
+        c.path = path.into();
         c.product = product.into();
         c
     }
@@ -278,10 +286,6 @@ mod tests {
         nak_all_on: &str,
         st: &mut State,
     ) -> (Vec<Device>, Rig) {
-        let rig = Rig {
-            writes: Rc::new(RefCell::new(Vec::new())),
-            opened: RefCell::new(Vec::new()),
-        };
         // The headset's audio collection is left alone.
         let mut audio = colls[0].clone();
         audio.page = 0x000C;
@@ -290,37 +294,43 @@ mod tests {
         all.extend(colls);
         let peers = peers.to_vec();
         let nak_all_on = nak_all_on.to_string();
-        let mut open: Box<Open<'_>> = Box::new(|c: &Coll| {
+        // Each collection queues its own replies to what is written to it.
+        let f = Fake::with(move |s, c, sent| {
             assert_eq!(c.page, 0xFF00);
-            let path = c.path.to_string_lossy().into_owned();
-            rig.opened.borrow_mut().push(path.clone());
-            let f = Fake::new();
-            let (peers, writes, nak_all) = (peers.clone(), rig.writes.clone(), path == nak_all_on);
-            f.replies(move |w| {
-                writes.borrow_mut().push(w.to_vec());
-                let (dst, seq, cls, op) = (w[1], w[3], w[5], w[6]);
-                if nak_all {
-                    return vec![frame(dst, seq, 0xFE, 0xFF, &[])];
+            if let Op::Write(w) = sent {
+                let nak_all = c.path == nak_all_on;
+                let replies = (|| {
+                    let (dst, seq, cls, op) = (w[1], w[3], w[5], w[6]);
+                    if nak_all {
+                        return vec![frame(dst, seq, 0xFE, 0xFF, &[])];
+                    }
+                    let Some((_, p)) = peers.iter().find(|(a, _)| *a == dst) else {
+                        return vec![];
+                    };
+                    if cls == 0x02 && op == 0x00 && !p.name.is_empty() {
+                        let mut payload = vec![p.name.len() as u8];
+                        payload.extend_from_slice(p.name.as_bytes());
+                        vec![frame(dst, seq, cls, op, &payload)]
+                    } else if cls == 0x12 && op == 0x02 && !p.battery.is_empty() {
+                        vec![frame(dst, seq, cls, op, &p.battery)]
+                    } else if p.nak != 0 {
+                        vec![frame(dst, seq, 0xFE, p.nak, &[])]
+                    } else {
+                        vec![]
+                    }
+                })();
+                for r in replies {
+                    s.push_input(&c.path, r);
                 }
-                let Some((_, p)) = peers.iter().find(|(a, _)| *a == dst) else {
-                    return vec![];
-                };
-                if cls == 0x02 && op == 0x00 && !p.name.is_empty() {
-                    let mut payload = vec![p.name.len() as u8];
-                    payload.extend_from_slice(p.name.as_bytes());
-                    vec![frame(dst, seq, cls, op, &payload)]
-                } else if cls == 0x12 && op == 0x02 && !p.battery.is_empty() {
-                    vec![frame(dst, seq, cls, op, &p.battery)]
-                } else if p.nak != 0 {
-                    vec![frame(dst, seq, 0xFE, p.nak, &[])]
-                } else {
-                    vec![]
-                }
-            });
-            Some(Box::new(f) as Box<dyn Io>)
+            }
+            queued(s, c, sent)
         });
-        let out = poll_colls(&all, &mut *open, st);
-        drop(open);
+        let out = poll_colls(&all, &mut f.clone(), st);
+        let s = f.s();
+        let rig = Rig {
+            writes: Rc::new(RefCell::new(s.writes())),
+            opened: RefCell::new(s.opened.clone()),
+        };
         (out, rig)
     }
 
@@ -368,9 +378,17 @@ mod tests {
         assert_eq!((out[0].percent, out[0].charging), (Some(60), false));
         assert_eq!(out[0].name, "Jabra Evolve2 65 Flex");
         assert_eq!(out[0].via, "Jabra Link dongle");
-        // Switched off: the dongle NAKs F3, nothing is listed.
+        let key = out[0].key.clone();
+        // Switched off: the dongle NAKs F3; listed switched off under the same key and name.
         let (out, _) = poll_with(link(), &[(0x04, peer(&[], 0xF3, ""))], "", &mut st);
-        assert!(out.is_empty());
+        assert_eq!((out.len(), out[0].off, out[0].percent), (1, true, None));
+        assert_eq!(
+            (out[0].key.as_str(), out[0].name.as_str()),
+            (key.as_str(), "Jabra Evolve2 65 Flex")
+        );
+        // The name is forgotten while off.
+        let (out, _) = poll_with(link(), &[(0x04, peer(&[], 0xF3, ""))], "", &mut st);
+        assert_eq!((out[0].off, out[0].name.as_str()), (true, "Jabra headset"));
     }
 
     #[test]

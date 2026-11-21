@@ -18,8 +18,8 @@ use batterylife_core::{Device, Tracker, poll_all};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None | Some("--list") => print_table(&poll_all()),
-        Some("--json") => println!("{}", to_json(&poll_all())),
+        None | Some("--list") => print_table(&once()),
+        Some("--json") => println!("{}", to_json(&once())),
         Some("--watch") => {
             let secs = match args.get(1).map(|s| s.parse::<u64>()) {
                 None => 60,
@@ -32,6 +32,11 @@ fn main() {
             "unknown option {other}; use --list, --json or --watch [secs]"
         )),
     }
+}
+
+/// One poll as the tracker shows it (devices reported switched off are left out).
+fn once() -> Vec<Device> {
+    Tracker::default().update(poll_all(), Instant::now())
 }
 
 fn fail(msg: &str) -> ! {

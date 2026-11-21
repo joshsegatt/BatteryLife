@@ -28,9 +28,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener, sum,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE, sum};
 
 pub const VID: u16 = 0x3434;
 
@@ -52,7 +50,7 @@ fn device(key: String, name: &str, kind: Kind, via: &'static str) -> Device {
 
 /// Reads until `take` accepts a report; `stop` ends the wait early (a timeout always does).
 fn wait(
-    port: &mut dyn Port,
+    port: &mut dyn Dev,
     timeout: Duration,
     stop: impl Fn(&[u8]) -> bool,
     take: impl Fn(&[u8]) -> bool,
@@ -85,7 +83,7 @@ pub fn mouse_request(cmd: u8, sub: u8) -> Vec<u8> {
     req
 }
 
-fn mouse_query(port: &mut dyn Port, cmd: u8, sub: u8) -> Option<Vec<u8>> {
+fn mouse_query(port: &mut dyn Dev, cmd: u8, sub: u8) -> Option<Vec<u8>> {
     port.flush();
     if !port.write(&mouse_request(cmd, sub)) {
         return None;
@@ -118,7 +116,7 @@ fn name_4k(pid: u16) -> Option<&'static str> {
 }
 
 /// A mouse on the Launcher protocol behind one product, or None.
-fn poll_mouse(c: &Coll, port: &mut dyn Port) -> Option<Device> {
+fn poll_mouse(c: &Coll, port: &mut dyn Dev) -> Option<Device> {
     let r1 = mouse_query(port, 0x01, 0x01);
     let tag = r1.as_ref().map_or(0, |r| u16::from_le_bytes([r[6], r[7]]));
     let key = format!("keychron:{:04X}", c.pid);
@@ -166,7 +164,7 @@ fn raw_request(cmd: &[u8]) -> Vec<u8> {
 }
 
 /// Nape Pro channel: skips short reports and notifications until a reply echoing `cmd`.
-fn raw_query(port: &mut dyn Port, cmd: &[u8]) -> Option<Vec<u8>> {
+fn raw_query(port: &mut dyn Dev, cmd: &[u8]) -> Option<Vec<u8>> {
     port.flush();
     if !port.write(&raw_request(cmd)) {
         return None;
@@ -180,7 +178,7 @@ fn raw_query(port: &mut dyn Port, cmd: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Keychron Link channel: a short report ends the wait, a reply starts with `cmd`.
-fn link_query(port: &mut dyn Port, cmd: u8, ms: u64) -> Option<Vec<u8>> {
+fn link_query(port: &mut dyn Dev, cmd: u8, ms: u64) -> Option<Vec<u8>> {
     port.flush();
     if !port.write(&raw_request(&[cmd])) {
         return None;
@@ -198,10 +196,12 @@ fn is_raw_hid(c: &Coll) -> bool {
 }
 
 /// Nape Pro trackball on the Link-KM receiver or its USB cable.
-fn poll_nape(colls: &[Coll], open: &mut Opener) -> Option<(u16, Device)> {
+fn poll_nape(colls: &[Coll], hid: &mut dyn Hid) -> Option<(u16, Device)> {
     for pid in [LINK_KM, NAPE_USB] {
         for c in colls.iter().filter(|c| c.is(VID, pid) && is_raw_hid(c)) {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             if pid == LINK_KM {
                 // Only ask when a Nape Pro sits in a receiver slot and is connected.
                 let Some(r) = raw_query(port.as_mut(), &[0xB2]).filter(|r| r.len() >= 17) else {
@@ -260,22 +260,24 @@ pub fn parse_legacy(r: &[u8]) -> Option<(u16, u8, bool)> {
 }
 
 /// Older mice on the 1K receiver (D030 Type-A, D031 Type-C).
-fn poll_legacy(colls: &[Coll], open: &mut Opener, out: &mut Vec<(u16, Device)>) {
+fn poll_legacy(colls: &[Coll], hid: &mut dyn Hid, out: &mut Vec<(u16, Device)>) {
     for rpid in [LEGACY_A, LEGACY_C] {
         for c in colls
             .iter()
             .filter(|c| c.is(VID, rpid) && c.page == 0x8C && c.feat_len >= 16)
         {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             if !port.set_feature(&[0x51, 0x06]) {
                 continue;
             }
             // The reply is usually there at once; give the mouse up to ~200 ms.
             let mut reply = None;
             for _ in 0..5 {
-                port.pause(Duration::from_millis(40));
+                port.sleep(Duration::from_millis(40));
                 reply = port
-                    .get_feature(0x51, c.feat_len as usize)
+                    .get_feature_len(0x51, c.feat_len as usize)
                     .filter(|r| r.len() >= 13 && r[0] == 0x51 && r[1] == 0x06);
                 if reply.is_some() {
                     break;
@@ -299,7 +301,7 @@ fn poll_legacy(colls: &[Coll], open: &mut Opener, out: &mut Vec<(u16, Device)>) 
 }
 
 /// Numbered report `id` [cmd] on FFC1; waits for an input report whose payload starts with cmd.
-fn ultra_query(port: &mut dyn Port, id: u8, cmd: u8) -> Option<Vec<u8>> {
+fn ultra_query(port: &mut dyn Dev, id: u8, cmd: u8) -> Option<Vec<u8>> {
     port.flush();
     if !port.write(&[id, cmd]) {
         return None;
@@ -308,7 +310,7 @@ fn ultra_query(port: &mut dyn Port, id: u8, cmd: u8) -> Option<Vec<u8>> {
 }
 
 /// 8K mouse on the Ultra-Link 8K receiver (Launcher protocol "8k" on FFC1:0001).
-fn poll_ultra(colls: &[Coll], open: &mut Opener) -> Option<Device> {
+fn poll_ultra(colls: &[Coll], hid: &mut dyn Hid) -> Option<Device> {
     for c in colls.iter().filter(|c| {
         c.is(VID, ULTRA_LINK_8K)
             && c.page == 0xFFC1
@@ -316,7 +318,9 @@ fn poll_ultra(colls: &[Coll], open: &mut Opener) -> Option<Device> {
             && c.out_len >= 21
             && c.in_len >= 21
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         // Only ask when a mouse sits in a receiver slot and is connected.
         let Some(r) = ultra_query(port.as_mut(), 0xB5, 0x03) else {
             continue;
@@ -350,12 +354,14 @@ fn poll_ultra(colls: &[Coll], open: &mut Opener) -> Option<Device> {
 }
 
 /// Keychron keyboards with the KC_GET_BATTERY patch, behind a Keychron Link receiver or on the cable.
-fn poll_link_keyboard(colls: &[Coll], open: &mut Opener, pid: u16) -> Option<Device> {
+fn poll_link_keyboard(colls: &[Coll], hid: &mut dyn Hid, pid: u16) -> Option<Device> {
     if pid == LINK_KM || pid == NAPE_USB {
         return None; // Nape Pro receiver / cable
     }
     for c in colls.iter().filter(|c| c.is(VID, pid) && is_raw_hid(c)) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         let port = port.as_mut();
         let via_link = link_query(port, 0xB2, 300);
         let via = if via_link.is_some() { RECEIVER } else { CABLE };
@@ -400,11 +406,11 @@ fn poll_link_keyboard(colls: &[Coll], open: &mut Opener, pid: u16) -> Option<Dev
     None
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut found: Vec<(u16, Device)> = Vec::new();
-    found.extend(poll_nape(colls, open));
-    poll_legacy(colls, open, &mut found);
-    found.extend(poll_ultra(colls, open).map(|d| (ULTRA_LINK_8K, d)));
+    found.extend(poll_nape(colls, hid));
+    poll_legacy(colls, hid, &mut found);
+    found.extend(poll_ultra(colls, hid).map(|d| (ULTRA_LINK_8K, d)));
 
     let mut pids: Vec<u16> = colls
         .iter()
@@ -421,31 +427,35 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
             .iter()
             .filter(|c| c.is(VID, pid) && c.page >= 0xFF00 && c.out_len == 65 && c.in_len == 65)
         {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             if let Some(d) = poll_mouse(c, port.as_mut()) {
                 found.push((pid, d));
                 break;
             }
         }
-        found.extend(poll_link_keyboard(colls, open, pid).map(|d| (pid, d)));
+        found.extend(poll_link_keyboard(colls, hid, pid).map(|d| (pid, d)));
     }
     found.into_iter().map(|(_, d)| d).collect()
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, feature_script, per_write, responder};
+
+    /// Feature reads go to `feature(state, path, id, len)`; a flush drops queued replies.
     use std::collections::HashMap;
 
     /// Replies per (cmd, sub) of the 65-byte requests, like BatteryHub's scripted device.
-    fn mouse_script(replies: Vec<((u8, u8), Vec<u8>)>) -> fake::Shared {
+    fn mouse_script(replies: Vec<((u8, u8), Vec<u8>)>) -> Fake {
         let table: HashMap<(u8, u8), Vec<u8>> = replies.into_iter().collect();
-        fake::responder(move |w| {
+        responder(move |w| {
             assert_eq!(w.len(), 65);
             assert_eq!(w[0], 0);
             table.get(&(w[1], w[4])).cloned().into_iter().collect()
@@ -479,8 +489,8 @@ mod tests {
         w
     }
 
-    fn run(s: &fake::Shared, c: Coll) -> Vec<Device> {
-        poll_with(&[c], &mut fake::opener(s))
+    fn run(s: &Fake, c: Coll) -> Vec<Device> {
+        poll_with(&[c], &mut s.clone())
     }
 
     #[test]
@@ -502,7 +512,7 @@ mod tests {
         ]);
         let out = run(&s, mouse_coll(0xD038));
         assert_eq!(
-            s.borrow().writes,
+            s.s().writes(),
             vec![
                 ask(0x01, 0x01, 0x1E),
                 ask(0x41, 0x01, 0xDE),
@@ -559,14 +569,14 @@ mod tests {
             ]);
             assert!(run(&s, mouse_coll(0xD038)).is_empty());
             assert_eq!(
-                s.borrow().writes,
+                s.s().writes(),
                 vec![ask(0x01, 0x01, 0x1E), ask(0x41, 0x01, 0xDE)]
             );
         }
         let s = mouse_script(vec![]);
         assert!(run(&s, mouse_coll(0xD038)).is_empty());
         assert_eq!(
-            s.borrow().writes,
+            s.s().writes(),
             vec![ask(0x01, 0x01, 0x1E), ask(0x41, 0x01, 0xDE)]
         );
         let s = mouse_script(vec![((0x01, 0x01), reply(0x01, 0x01, &[]))]);
@@ -588,7 +598,7 @@ mod tests {
             ((0x41, 0x01), reply(0x41, 0x01, &[(6, 99)])),
         ]);
         let out = run(&s, mouse_coll(0xD028));
-        assert_eq!(s.borrow().writes, vec![ask(0x01, 0x01, 0x1E)]);
+        assert_eq!(s.s().writes(), vec![ask(0x01, 0x01, 0x1E)]);
         assert_eq!(
             (out[0].key.as_str(), out[0].percent, out[0].charging),
             ("keychron:D028", Some(64), true)
@@ -606,7 +616,7 @@ mod tests {
         ]);
         let out = run(&s, mouse_coll(0xD028));
         assert_eq!(
-            s.borrow().writes,
+            s.s().writes(),
             vec![ask(0x01, 0x01, 0x1E), ask(0x41, 0x01, 0xDE)]
         );
         assert_eq!((out[0].percent, out[0].charging), (Some(81), false));
@@ -621,7 +631,7 @@ mod tests {
         for c in [short, mouse_page] {
             let s = mouse_script(vec![((0x01, 0x01), reply(0x01, 0x01, &[]))]);
             assert!(run(&s, c).is_empty());
-            assert!(s.borrow().opened.is_empty());
+            assert!(s.s().opened.is_empty());
         }
     }
 
@@ -640,28 +650,25 @@ mod tests {
     }
 
     /// GetFeature 51 reads back the reply once SetFeature 51 06 queued it (zeros before).
-    fn receiver_1k(reply: Vec<u8>) -> fake::Shared {
-        let s = fake::script();
-        let log = s.clone();
-        s.borrow_mut().feature = Some(Box::new(move |_, id, len| {
+    fn receiver_1k(reply: Vec<u8>) -> Fake {
+        feature_script(move |log, _, id, len| {
             assert_eq!(id, 0x51);
             let mut out = vec![0u8; len];
             out[0] = id;
-            let queued = log.borrow().features.iter().any(|f| f[..] == [0x51, 0x06]);
+            let queued = log.features().iter().any(|f| f[..] == [0x51, 0x06]);
             if queued && !reply.is_empty() {
                 out[..reply.len()].copy_from_slice(&reply);
             }
             Some(out)
-        }));
-        s
+        })
     }
 
     #[test]
     fn receiver_1k_status() {
         let s = receiver_1k(status(0x01, VID, 0xD033, 87, 0x00));
         let out = run(&s, legacy_coll(LEGACY_A));
-        assert_eq!(s.borrow().features, vec![vec![0x51, 0x06]]);
-        assert!(s.borrow().writes.is_empty());
+        assert_eq!(s.s().features(), vec![vec![0x51, 0x06]]);
+        assert!(s.s().writes().is_empty());
         let d = &out[0];
         assert_eq!(
             (d.key.as_str(), d.name.as_str()),
@@ -692,7 +699,7 @@ mod tests {
         for c in [no_feature, legacy_coll(0xD038)] {
             let s = receiver_1k(status(0x01, VID, 0xD033, 87, 0));
             assert!(run(&s, c).is_empty());
-            assert!(s.borrow().features.is_empty());
+            assert!(s.s().features().is_empty());
         }
     }
 
@@ -726,8 +733,8 @@ mod tests {
         )
     }
 
-    fn ultra_script(slots: Option<Vec<u8>>, base: Option<Vec<u8>>) -> fake::Shared {
-        fake::responder(move |w| {
+    fn ultra_script(slots: Option<Vec<u8>>, base: Option<Vec<u8>>) -> Fake {
+        responder(move |w| {
             assert_eq!(w.len(), 2);
             match (w[0], w[1]) {
                 (0xB5, 0x03) => slots.clone().into_iter().collect(),
@@ -744,7 +751,7 @@ mod tests {
             Some(ultra_reply(0xB3, 0x06, &[(19, 0xE4)])),
         );
         let out = run(&s, ultra_coll(0xFFC1));
-        assert_eq!(s.borrow().writes, vec![vec![0xB5, 0x03], vec![0xB3, 0x06]]);
+        assert_eq!(s.s().writes(), vec![vec![0xB5, 0x03], vec![0xB3, 0x06]]);
         let d = &out[0];
         assert_eq!(
             (d.key.as_str(), d.percent, d.charging),
@@ -768,7 +775,7 @@ mod tests {
             Some(ultra_reply(0xB3, 0x06, &[(19, 50)])),
         );
         assert!(run(&s, ultra_coll(0xFFC1)).is_empty());
-        assert_eq!(s.borrow().writes, vec![vec![0xB5, 0x03]]);
+        assert_eq!(s.s().writes(), vec![vec![0xB5, 0x03]]);
         let s = ultra_script(None, Some(ultra_reply(0xB3, 0x06, &[(19, 50)])));
         assert!(run(&s, ultra_coll(0xFFC1)).is_empty());
         for bad in [0x00u8, 0x80, 101, 0xFF] {
@@ -783,7 +790,7 @@ mod tests {
 
         let s = ultra_script(Some(ultra_slots(0, 1)), None);
         assert!(run(&s, ultra_coll(0xFF0B)).is_empty());
-        assert!(s.borrow().opened.is_empty());
+        assert!(s.s().opened.is_empty());
     }
 
     fn raw_reply(head: &[u8]) -> Vec<u8> {
@@ -797,13 +804,13 @@ mod tests {
         // Slot 1 holds the Nape Pro (pid 4004 big endian), connected.
         let mut slots = raw_reply(&[0xB2]);
         slots[7..12].copy_from_slice(&[0x34, 0x34, 0x40, 0x04, 1]);
-        let s = fake::responder(move |w| match &w[1..3] {
+        let s = responder(move |w| match &w[1..3] {
             [0xB2, 0] => vec![slots.clone()],
             [0xA7, 0x31] => vec![vec![0xA7, 0x31], raw_reply(&[0xA7, 0x31, 66, 1])],
             _ => vec![],
         });
         let out = run(&s, coll(VID, LINK_KM, 0xFF60, 0x61, 33));
-        assert_eq!(s.borrow().writes[1], raw_request(&[0xA7, 0x31]));
+        assert_eq!(s.s().writes()[1], raw_request(&[0xA7, 0x31]));
         let d = &out[0];
         assert_eq!(
             (d.key.as_str(), d.percent, d.charging),
@@ -817,7 +824,7 @@ mod tests {
         // Receiver slot 0: 3434:0A52 connected; A4 lost once while the link wakes up.
         let mut slots = raw_reply(&[0xB2, 1]);
         slots[2..7].copy_from_slice(&[0x34, 0x34, 0x52, 0x0A, 1]);
-        let s = fake::per_write(vec![
+        let s = per_write(vec![
             vec![slots],
             vec![],
             vec![raw_reply(&[0xA4, 77, 0x10, 0x0F, 1])],
@@ -835,7 +842,7 @@ mod tests {
         assert_eq!((d.kind, d.via.as_str()), (Kind::Keyboard, RECEIVER));
 
         // A keyboard on its cable answers B2 with FF, then A4 itself.
-        let s = fake::per_write(vec![
+        let s = per_write(vec![
             vec![raw_reply(&[0xFF])],
             vec![raw_reply(&[0xA4, 50, 0, 0, 0])],
         ]);
@@ -846,7 +853,7 @@ mod tests {
         );
 
         // Stock firmware never answers A4.
-        let s = fake::per_write(vec![vec![raw_reply(&[0xFF])], vec![raw_reply(&[0xFF])]]);
+        let s = per_write(vec![vec![raw_reply(&[0xFF])], vec![raw_reply(&[0xFF])]]);
         assert!(run(&s, coll(VID, 0x0A51, 0xFF60, 0x61, 33)).is_empty());
     }
 }

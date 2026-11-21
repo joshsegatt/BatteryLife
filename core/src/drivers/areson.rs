@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x25A7;
@@ -25,7 +25,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn request() -> [u8; 17] {
@@ -46,20 +46,20 @@ pub fn parse(r: &[u8]) -> Option<(u8, bool)> {
 fn query(
     cmd: &mut dyn Dev,
     reply: &mut dyn Dev,
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     end: Instant,
 ) -> Option<(u8, bool)> {
     for attempt in 0..2 {
         if attempt > 0 {
-            io.sleep(200);
+            io.sleep(Duration::from_millis(200));
         }
         // A report queued before the request would be mistaken for the answer.
         reply.flush();
         if !cmd.set_feature(&request()) {
             return None; // receiver gone; retrying will not help
         }
-        let left = ms_left(end).min(500);
-        if left == 0 {
+        let left = left(end).min(Duration::from_millis(500));
+        if left.is_zero() {
             return None;
         }
         if let Some(p) = reply.read(left).and_then(|r| parse(&r)) {
@@ -69,10 +69,10 @@ fn query(
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
-    'products: for pid in products(colls, VID) {
+    'products: for pid in pids(colls, VID) {
         if pid != 0xFA07 && pid != 0xFA08 {
             continue;
         }
@@ -82,7 +82,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
             for i in find(colls, VID, pid, |c| {
                 c.iface == 1 && c.page == 0xFF01 && c.usage == 0 && c.in_len >= 17
             }) {
-                if ms_left(end) == 0 {
+                if left(end).is_zero() {
                     return out;
                 }
                 let Some(mut cmd) = io.open(c) else { continue };
@@ -113,7 +113,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     fn reply(level: u8, charging: u8) -> Vec<u8> {
         let mut r = vec![0u8; 17];
@@ -138,11 +138,14 @@ mod tests {
     fn asks_on_feature_and_reads_the_input_collection() {
         let cmd = coll(VID, 0xFA07, 1, 0xFF02, 2, 0, 0, 17);
         let rep = coll(VID, 0xFA07, 1, 0xFF01, 0, 17, 0, 0);
-        let reply_path = rep.path.to_string_lossy().to_string();
-        let mut f = Fake::with(move |s, _, kind, q| {
-            assert_eq!(kind, Sent::Feature);
-            assert_eq!(q, request());
-            s.push_input(&reply_path, reply(8, 1));
+        let reply_path = rep.path.clone();
+        let mut f = Fake::with(move |s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetFeature(_)));
+                assert_eq!(q, request());
+                s.push_input(&reply_path, reply(8, 1));
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(&[cmd, rep], &mut f);
         assert_eq!(out.len(), 1);

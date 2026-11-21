@@ -28,9 +28,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener, sum,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE, sum};
 use crate::drivers::sonix;
 use crate::registry::Match;
 
@@ -149,7 +147,7 @@ pub fn is_by_reply(r: &[u8], cmd: u8) -> bool {
 }
 
 /// Sends 13 <cmd> and waits for its reply, resending every 1.3 s (byte 2 alternating 00 / 01).
-fn by_exchange(port: &mut dyn Port, cmd: u8, total: Duration) -> Option<Vec<u8>> {
+fn by_exchange(port: &mut dyn Dev, cmd: u8, total: Duration) -> Option<Vec<u8>> {
     const RESEND: Duration = Duration::from_millis(1300);
     let start = Instant::now();
     let end = start + total;
@@ -215,13 +213,15 @@ impl ReceiverState {
     }
 }
 
-fn poll_by(colls: &[Coll], open: &mut Opener, vid: u16, pid: u16) -> (bool, Option<Device>) {
+fn poll_by(colls: &[Coll], hid: &mut dyn Hid, vid: u16, pid: u16) -> (bool, Option<Device>) {
     let mut tried = false;
     for c in colls
         .iter()
         .filter(|c| c.is(vid, pid) && is_by_collection(c))
     {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         let port = port.as_mut();
         let apple = is_apple_id(vid, pid);
         // The generic receiver names carry a model code; M HUB asks no other 3554 / 41E4 device.
@@ -326,7 +326,7 @@ pub fn hero_message() -> Vec<u8> {
 }
 
 struct HeroLink<'a> {
-    port: &'a mut dyn Port,
+    port: &'a mut dyn Dev,
     end: Instant,
     level: Option<u8>,
     flags: Option<u8>,
@@ -336,7 +336,7 @@ struct HeroLink<'a> {
 }
 
 impl<'a> HeroLink<'a> {
-    fn new(port: &'a mut dyn Port) -> Self {
+    fn new(port: &'a mut dyn Dev) -> Self {
         // The whole exchange takes ~30 ms when the keyboard is awake.
         let end = Instant::now() + Duration::from_secs(1);
         Self {
@@ -456,7 +456,7 @@ impl<'a> HeroLink<'a> {
     }
 }
 
-fn query_hero(port: &mut dyn Port) -> Option<(u8, bool)> {
+fn query_hero(port: &mut dyn Dev) -> Option<(u8, bool)> {
     port.flush();
     let mut link = HeroLink::new(port);
     if !link.send_message(&hero_message()) || !link.wait_for_battery() {
@@ -465,12 +465,14 @@ fn query_hero(port: &mut dyn Port) -> Option<(u8, bool)> {
     Some((link.level?, link.flags.is_some_and(|f| f & 0x10 != 0)))
 }
 
-fn poll_hero(colls: &[Coll], open: &mut Opener) -> Option<Device> {
+fn poll_hero(colls: &[Coll], hid: &mut dyn Hid) -> Option<Device> {
     let (vid, pid) = HERO;
     for c in colls.iter().filter(|c| {
         c.is(vid, pid) && c.page == 0xFF60 && c.usage == 0x0061 && c.out_len >= 20 && c.in_len >= 20
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         let Some((level, charging)) = query_hero(port.as_mut()) else {
             continue;
         };
@@ -505,7 +507,7 @@ pub fn sc580_request() -> Vec<u8> {
     req
 }
 
-fn sc580_info(port: &mut dyn Port) -> ScResult {
+fn sc580_info(port: &mut dyn Dev) -> ScResult {
     const RESEND: Duration = Duration::from_millis(250);
     let end = Instant::now() + Duration::from_secs(1);
     let left = || end.saturating_duration_since(Instant::now());
@@ -540,7 +542,7 @@ fn sc580_info(port: &mut dyn Port) -> ScResult {
                 0 => continue,
                 2 => return ScResult::Offline,
                 1 => {
-                    port.pause(Duration::from_millis(300).min(left())); // busy
+                    port.sleep(Duration::from_millis(300).min(left())); // busy
                     break;
                 }
                 _ => break, // data error: send again
@@ -550,7 +552,7 @@ fn sc580_info(port: &mut dyn Port) -> ScResult {
     ScResult::Failed
 }
 
-fn poll_sc580(colls: &[Coll], open: &mut Opener) -> Option<Device> {
+fn poll_sc580(colls: &[Coll], hid: &mut dyn Hid) -> Option<Device> {
     // One entry when the mouse charges on the cable next to its receiver: the cable is asked first.
     'ids: for (vid, pid, cable) in SC580 {
         for c in colls.iter().filter(|c| {
@@ -560,7 +562,9 @@ fn poll_sc580(colls: &[Coll], open: &mut Opener) -> Option<Device> {
                 && c.out_len >= 33
                 && c.in_len >= 33
         }) {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             let data = match sc580_info(port.as_mut()) {
                 ScResult::Failed => continue,
                 ScResult::Offline => None,
@@ -596,11 +600,11 @@ fn poll_sc580(colls: &[Coll], open: &mut Opener) -> Option<Device> {
 
 pub fn poll_with(
     colls: &[Coll],
-    open: &mut Opener,
+    hid: &mut dyn Hid,
     states: &mut [ReceiverState; 4],
     now: Instant,
 ) -> Vec<Device> {
-    let mut out: Vec<Device> = poll_sc580(colls, open).into_iter().collect();
+    let mut out: Vec<Device> = poll_sc580(colls, hid).into_iter().collect();
     for (i, &(vid, pid)) in RECEIVERS.iter().enumerate() {
         let st = &mut states[i];
         if !colls.iter().any(|c| c.is(vid, pid)) {
@@ -611,7 +615,7 @@ pub fn poll_with(
         let waiting = !st.answered && st.next_try.is_some_and(|t| now < t);
         let mut found = None;
         if mchose_layout && !waiting {
-            let (tried, d) = poll_by(colls, open, vid, pid);
+            let (tried, d) = poll_by(colls, hid, vid, pid);
             if d.is_some() {
                 st.answered = true;
             } else if tried && !st.answered {
@@ -621,11 +625,11 @@ pub fn poll_with(
         }
         // A SONiX dongle on Apple's id (or an MCHOSE one that did not answer): sonix.rs reads it.
         if found.is_none() && is_apple_id(vid, pid) {
-            found = sonix::poll_product(colls, open, vid, pid);
+            found = sonix::poll_product(colls, hid, vid, pid);
         }
         out.extend(found);
     }
-    out.extend(poll_hero(colls, open));
+    out.extend(poll_hero(colls, hid));
     out
 }
 
@@ -642,23 +646,21 @@ static STATES: Mutex<[ReceiverState; 4]> = Mutex::new(
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut states = STATES.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
-    poll_with(
-        &colls(infos),
-        &mut hid_opener(api, now + BUDGET),
-        &mut states,
-        now,
-    )
+    hid::run(api, infos, |hid, colls| {
+        poll_with(colls, hid, &mut states, now)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, at, coll};
+    use crate::drivers::hid::fake::{Fake, at, coll, per_write, responder, script};
 
-    fn run(colls: &[Coll], s: &fake::Shared) -> Vec<Device> {
+    /// A flush drops queued replies, as on the device.
+    fn run(colls: &[Coll], s: &Fake) -> Vec<Device> {
         poll_with(
             colls,
-            &mut fake::opener(s),
+            &mut s.clone(),
             &mut [ReceiverState::default(); 4],
             Instant::now(),
         )
@@ -713,10 +715,9 @@ mod tests {
     }
 
     /// Replies already queued (BatteryHub's SC580 test device), kept across flushes.
-    fn queued(replies: Vec<Vec<u8>>) -> fake::Shared {
-        let s = fake::script();
-        s.borrow_mut().pending = replies.into();
-        s.borrow_mut().keep_on_flush = true;
+    fn queued(replies: Vec<Vec<u8>>) -> Fake {
+        let s = Fake::new();
+        s.queue(replies);
         s
     }
 
@@ -724,7 +725,7 @@ mod tests {
     fn sc580_captured_replies() {
         let s = queued(vec![awake()]);
         let out = run(&[sc580(false)], &s);
-        assert_eq!(s.borrow().writes, vec![sc580_request()]);
+        assert_eq!(s.s().writes(), vec![sc580_request()]);
         let d = &out[0];
         assert_eq!((d.percent, d.charging, d.asleep), (Some(90), false, false));
         assert_eq!(
@@ -749,15 +750,15 @@ mod tests {
         let s = queued(vec![charging()]);
         let out = run(&[sc580(false), sc580(true)], &s);
         assert_eq!(out.len(), 1);
-        assert_eq!(s.borrow().opened, vec!["cable".to_string()]);
+        assert_eq!(s.s().opened, vec!["cable".to_string()]);
 
         let push = sc(&[0xD1, 0x01, 0x5A, 0x00, 0x01, 0x11, 0x01], 0);
         let s = queued(vec![push, sc(&[0x13, 0x00, 0x01], 0), awake()]);
         assert_eq!(run(&[sc580(false)], &s)[0].percent, Some(90));
-        assert_eq!(s.borrow().writes.len(), 2);
+        assert_eq!(s.s().writes().len(), 2);
         let s = queued(vec![sc(&[0x30, 0x01, 0x01], 0), awake()]);
         assert_eq!(run(&[sc580(false)], &s)[0].percent, Some(90));
-        assert_eq!(s.borrow().writes.len(), 2);
+        assert_eq!(s.s().writes().len(), 2);
     }
 
     #[test]
@@ -779,12 +780,12 @@ mod tests {
             }
             let s = queued(vec![awake()]);
             assert!(run(&[c], &s).is_empty());
-            assert!(s.borrow().opened.is_empty());
+            assert!(s.s().opened.is_empty());
         }
-        let s = fake::script();
-        s.borrow_mut().fail_write = true;
+        let s = script();
+        s.s().refuse_send = true;
         assert!(run(&[sc580(false)], &s).is_empty());
-        assert_eq!(s.borrow().writes.len(), 1);
+        assert_eq!(s.s().writes().len(), 1);
     }
 
     // --- BY receivers ---
@@ -826,7 +827,7 @@ mod tests {
 
     #[test]
     fn aula_keyboard_on_the_by_receiver() {
-        let s = fake::responder(|w| {
+        let s = responder(|w| {
             if w[1] == 0x4A {
                 vec![by_reply(0x4A, &[0, 77, 0x10])]
             } else {
@@ -834,7 +835,7 @@ mod tests {
             }
         });
         let out = run(&[by_coll(0x3554, 0xFA09, "Compx 2.4G")], &s);
-        assert_eq!(s.borrow().writes, vec![by_request(0x4A, 0)]);
+        assert_eq!(s.s().writes(), vec![by_request(0x4A, 0)]);
         let d = &out[0];
         assert_eq!(
             (d.key.as_str(), d.name.as_str()),
@@ -848,7 +849,7 @@ mod tests {
 
     #[test]
     fn mchose_model_code_names_the_keyboard() {
-        let s = fake::responder(|w| match w[1] {
+        let s = responder(|w| match w[1] {
             0x05 => vec![by_reply(0x05, &[0, 0x03, 0, 0, 0, 0x01, 0xDF])],
             0x4A => vec![by_reply(0x4A, &[0, 64, 0x01])],
             _ => vec![],
@@ -870,7 +871,7 @@ mod tests {
         let mut sonix_coll = coll(0x05AC, 0x024F, 0xFF60, 0x61, 33);
         sonix_coll.iface = 3;
         sonix_coll.product = "AJAZZ AK820 MAX 2.4G".into();
-        let s = fake::per_write(vec![vec![vec![0x20, 1, 0, 58]]]);
+        let s = per_write(vec![vec![vec![0x20, 1, 0, 58]]]);
         let out = run(&[sonix_coll], &s);
         assert_eq!(
             (out[0].key.as_str(), out[0].name.as_str(), out[0].percent),
@@ -883,7 +884,7 @@ mod tests {
         let mut feature = coll(0x05AC, 0x024F, 0xFF04, 0x0002, 0);
         feature.iface = 1;
         feature.feat_len = 64;
-        let s = fake::responder(|w| match w[1] {
+        let s = responder(|w| match w[1] {
             0x05 => vec![by_reply(0x05, &[0, 0x03, 0, 0, 0, 0x01, 0x35])],
             0x4A => vec![by_reply(0x4A, &[0, 91, 0x00])],
             _ => vec![],
@@ -900,57 +901,57 @@ mod tests {
         let mut st = [ReceiverState::default(); 4];
         let t0 = Instant::now();
         let colls = [by_coll(0x3554, 0xFA09, "Compx 2.4G")];
-        let s = fake::script();
+        let s = script();
         for minutes in [0, 3, 6] {
             poll_with(
                 &colls,
-                &mut fake::opener(&s),
+                &mut s.clone(),
                 &mut st,
                 t0 + Duration::from_secs(minutes * 60),
             );
         }
-        let sent = s.borrow().writes.len();
+        let sent = s.s().writes().len();
         assert_eq!(sent, 3);
         poll_with(
             &colls,
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             t0 + Duration::from_secs(8 * 60),
         );
         assert_eq!(
-            s.borrow().writes.len(),
+            s.s().writes().len(),
             sent,
             "inside the first 5-minute back-off"
         );
         poll_with(
             &colls,
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             t0 + Duration::from_secs(12 * 60),
         );
-        assert_eq!(s.borrow().writes.len(), sent + 1);
+        assert_eq!(s.s().writes().len(), sent + 1);
         // Unplugging starts over.
         poll_with(
             &[],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             t0 + Duration::from_secs(13 * 60),
         );
         poll_with(
             &colls,
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             t0 + Duration::from_secs(13 * 60),
         );
-        assert_eq!(s.borrow().writes.len(), sent + 2);
+        assert_eq!(s.s().writes().len(), sent + 2);
     }
 
     // --- HERO 68 Air ---
 
     /// The keyboard: acknowledges every host data / trailer frame, and after the host trailer sends
     /// its reply (87 00 00 01 00 02 <level> <flags>) as one data frame plus its trailer.
-    fn hero_keyboard(level: u8, flags: u8) -> fake::Shared {
-        fake::responder(move |w| {
+    fn hero_keyboard(level: u8, flags: u8) -> Fake {
+        responder(move |w| {
             assert_eq!((w.len(), w[0], w[1]), (20, HERO_ID, HERO_MAGIC));
             match w[4] & 0x7F {
                 HERO_DATA => vec![hero_ack(w)],
@@ -996,7 +997,7 @@ mod tests {
             (d.key.as_str(), d.percent, d.charging),
             ("aula:372E:106C", Some(68), true)
         );
-        let w = &s.borrow().writes;
+        let w = &s.s().writes();
         // 4 data frames + trailer, then ACKs for the keyboard's data frame and trailer.
         assert_eq!(w.len(), 7);
         assert_eq!(w[4][4] & 0x7F, HERO_TRAILER_HOST);
@@ -1004,6 +1005,6 @@ mod tests {
 
         let out = run(&[c], &hero_keyboard(55, 0x00));
         assert_eq!((out[0].percent, out[0].charging), (Some(55), false));
-        assert!(run(&[coll(HERO.0, HERO.1, 0xFF60, 0x0061, 20)], &fake::script()).is_empty());
+        assert!(run(&[coll(HERO.0, HERO.1, 0xFF60, 0x0061, 20)], &script()).is_empty());
     }
 }

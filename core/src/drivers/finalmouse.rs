@@ -17,7 +17,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, MAX_WAIT, device, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, MAX_WAIT, find};
 
 pub const VID: u16 = 0x361D;
 pub const PIDS: &[u16] = &[0x0100, 0x0300, 0x0301];
@@ -158,7 +158,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let mut out = Vec::new();
     for m in MODELS {
         let mut cs = find(colls, VID, m.pid, |c| {
-            c.page == 0xFF00 && (m.slx || c.usage == 1) && c.input >= 4 && c.output >= 4
+            c.page == 0xFF00 && (m.slx || c.usage == 1) && c.in_len >= 4 && c.out_len >= 4
         });
         // The SLX vendor usage is not known; try usage 1 (the ULX one) first.
         cs.sort_by_key(|c| c.usage != 1);
@@ -167,7 +167,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             let Some(st) = query(hid, d.as_mut(), m) else {
                 continue;
             };
-            let mut s = device(
+            let mut s = Device::new(
                 format!("finalmouse:{:04X}", m.pid),
                 m.name,
                 Kind::Mouse,
@@ -193,13 +193,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::HashMap;
 
     fn coll(pid: u16, path: &str, usage: u16, page: u16) -> Coll {
@@ -208,8 +208,8 @@ mod tests {
             pid,
             page,
             usage,
-            input: 64,
-            output: 64,
+            in_len: 64,
+            out_len: 64,
             path: path.into(),
             ..Default::default()
         }
@@ -244,7 +244,7 @@ mod tests {
         reject: &'static [&'static str],
     ) -> Fake {
         let mut pending: Vec<Vec<u8>> = Vec::new();
-        Fake::new(move |c, op| match op {
+        Fake::with(move |_, c, op| match op.clone() {
             Op::Write(w) => {
                 assert!(w.len() == 4 && w[1] == 2 && w[2] & 0x80 != 0 && w[3] == 0);
                 if reject.contains(&c.path.as_str()) {
@@ -266,8 +266,8 @@ mod tests {
     }
 
     fn writes(f: &Fake) -> Vec<(String, Vec<u8>)> {
-        f.log
-            .borrow()
+        f.s()
+            .log
             .iter()
             .filter_map(|(p, o)| match o {
                 Op::Write(w) => Some((p.clone(), w.clone())),
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn only_the_known_dongles_and_their_vendor_collection() {
         let mut no_output = coll(0x0100, "no-output", 1, 0xFF00);
-        no_output.output = 0;
+        no_output.out_len = 0;
         let (out, f) = poll(
             &[
                 coll(0x0102, "ulx-cable", 1, 0xFF00),
@@ -449,6 +449,6 @@ mod tests {
             vec![],
         );
         assert!(out.is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
     }
 }

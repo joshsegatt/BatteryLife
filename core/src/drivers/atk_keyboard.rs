@@ -18,9 +18,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 use crate::registry::Match;
 
 const VID: u16 = 0x320F;
@@ -131,7 +129,7 @@ pub fn next_seq(seq: &mut u16) -> u16 {
 
 /// Sends one Evision request and waits up to `timeout` for its reply.
 pub fn evision_read(
-    port: &mut dyn Port,
+    port: &mut dyn Dev,
     seq: u16,
     variant: u8,
     timeout: Duration,
@@ -155,7 +153,7 @@ pub fn evision_read(
 }
 
 /// Z87: an FF in place of the command byte is the receiver answering for a sleeping keyboard.
-fn read_z87(port: &mut dyn Port, seq: u16) -> Option<(u8, bool)> {
+fn read_z87(port: &mut dyn Dev, seq: u16) -> Option<(u8, bool)> {
     port.flush();
     if !port.write(&evision_request(seq, 0)) {
         return None;
@@ -193,7 +191,7 @@ pub struct State {
     z87: Option<(u8, bool)>,
 }
 
-fn poll_z87(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant) -> Option<Device> {
+fn poll_z87(colls: &[Coll], hid: &mut dyn Hid, st: &mut State, now: Instant) -> Option<Device> {
     let Some(c) = colls.iter().find(|c| {
         c.is(Z87_VID, Z87_RECEIVER)
             && c.page == 0xFF1C
@@ -211,7 +209,7 @@ fn poll_z87(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant) -> 
     if st.z87_next_ask.is_none_or(|t| now >= t) {
         st.z87_next_ask = Some(now + RECEIVER_INTERVAL);
         let seq = next_seq(&mut st.z87_seq);
-        st.z87 = open(c).and_then(|mut p| read_z87(p.as_mut(), seq));
+        st.z87 = hid.open(c).and_then(|mut p| read_z87(p.as_mut(), seq));
         if st.z87.is_none() {
             st.z87_next_ask = Some(now + Duration::from_secs(30));
         }
@@ -225,8 +223,8 @@ fn poll_z87(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant) -> 
     Some(d)
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant) -> Vec<Device> {
-    let mut out: Vec<Device> = poll_z87(colls, open, st, now).into_iter().collect();
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid, st: &mut State, now: Instant) -> Vec<Device> {
+    let mut out: Vec<Device> = poll_z87(colls, hid, st, now).into_iter().collect();
     for pid in [CABLE_PID, RECEIVER_PID] {
         // The cable wins when both are connected.
         let cable = pid == CABLE_PID;
@@ -254,7 +252,7 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener, st: &mut State, now: Instant
                 let seq = next_seq(&mut st.seq);
                 let variant = if vgn { 0x06 } else { 0x00 };
                 // The reply arrives up to ~1 s after the request on a VGN receiver.
-                let r = open(c).and_then(|mut p| {
+                let r = hid.open(c).and_then(|mut p| {
                     evision_read(p.as_mut(), seq, variant, Duration::from_millis(2500))
                 });
                 if r.is_some() {
@@ -281,14 +279,16 @@ pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(State::default);
     let now = Instant::now();
-    poll_with(&colls(infos), &mut hid_opener(api, now + BUDGET), st, now)
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid, st, now))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, at, coll};
+    use crate::drivers::hid::fake::{Fake, at, coll, path_responder, script};
 
+    /// After each accepted send, queues `respond(path, data)`; a flush drops queued replies.
+    /// A flush drops queued replies, as on the device.
     fn z87() -> Coll {
         let mut c = at(
             coll(Z87_VID, Z87_RECEIVER, 0xFF1C, 0x0092, 64),
@@ -307,9 +307,8 @@ mod tests {
 
     /// The test device of BatteryHub's atk_keyboard test: Evision boards answer 37 % charging; the Z87
     /// answers a truncated report, a stale reply, then `level` / `charge` (or FF when asleep).
-    fn device(level: u8, charge: u8, asleep: bool) -> fake::Shared {
-        let s = fake::script();
-        s.borrow_mut().respond = Some(Box::new(move |path, w| {
+    fn device(level: u8, charge: u8, asleep: bool) -> Fake {
+        path_responder(move |path, w| {
             assert!(w.len() >= 4 && w[0] == 4 && w[3] == 0x1A);
             assert!(w[5..].iter().all(|b| *b == 0));
             let mut report = w.to_vec();
@@ -329,8 +328,7 @@ mod tests {
             report[8] = level;
             report[9] = charge;
             vec![report[..4].to_vec(), stale, report]
-        }));
-        s
+        })
     }
 
     #[test]
@@ -359,11 +357,11 @@ mod tests {
         let mut st = State::default();
         let out = poll_with(
             &[mouse, wrong_vendor, other_page, short, other_name],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             Instant::now(),
         );
-        assert!(out.is_empty() && s.borrow().opened.is_empty());
+        assert!(out.is_empty() && s.s().opened.is_empty());
     }
 
     #[test]
@@ -371,14 +369,9 @@ mod tests {
         let s = device(92, 0, false);
         let mut st = State::default();
         let now = Instant::now();
-        let out = poll_with(
-            &[cable("ATK V75X"), z87()],
-            &mut fake::opener(&s),
-            &mut st,
-            now,
-        );
+        let out = poll_with(&[cable("ATK V75X"), z87()], &mut s.clone(), &mut st, now);
         assert_eq!(out.len(), 2);
-        assert_eq!(s.borrow().opened.len(), 2);
+        assert_eq!(s.s().opened.len(), 2);
         let z = out.iter().find(|d| d.key == "atk_keyboard:1012").unwrap();
         assert_eq!(
             (z.name.as_str(), z.percent, z.charging),
@@ -396,11 +389,11 @@ mod tests {
         let s = device(92, 0, false);
         let out = poll_with(
             &[z87()],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             now + Duration::from_secs(60),
         );
-        assert!(s.borrow().writes.is_empty());
+        assert!(s.s().writes().is_empty());
         assert_eq!(out[0].percent, Some(92));
     }
 
@@ -408,25 +401,25 @@ mod tests {
     fn z87_unplug_sleep_and_bad_levels() {
         let mut st = State::default();
         let now = Instant::now();
-        poll_with(&[], &mut fake::opener(&fake::script()), &mut st, now);
+        poll_with(&[], &mut script(), &mut st, now);
         let s = device(0, 0, true);
-        let out = poll_with(&[z87()], &mut fake::opener(&s), &mut st, now);
-        assert_eq!(s.borrow().writes.len(), 1);
+        let out = poll_with(&[z87()], &mut s.clone(), &mut st, now);
+        assert_eq!(s.s().writes().len(), 1);
         assert!(out[0].asleep && out[0].percent.is_none());
         let s = device(0, 0, true);
         let out = poll_with(
             &[z87()],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             now + Duration::from_secs(1),
         );
-        assert!(s.borrow().writes.is_empty() && out[0].asleep);
+        assert!(s.s().writes().is_empty() && out[0].asleep);
 
         for (level, state) in [(101u8, 0u8), (92, 3), (0, 2)] {
-            poll_with(&[], &mut fake::opener(&fake::script()), &mut st, now);
+            poll_with(&[], &mut script(), &mut st, now);
             let s = device(level, state, false);
-            let d = &poll_with(&[z87()], &mut fake::opener(&s), &mut st, now)[0];
-            assert_eq!(s.borrow().writes.len(), 1);
+            let d = &poll_with(&[z87()], &mut s.clone(), &mut st, now)[0];
+            assert_eq!(s.s().writes().len(), 1);
             if level == 0 {
                 assert!(!d.asleep && d.percent == Some(0) && d.charging);
             } else {
@@ -440,14 +433,9 @@ mod tests {
         for (product, variant) in [("VGN S99", 0x06), ("Wireless Gaming Keyboard", 0x00)] {
             let s = device(0, 0, false);
             let mut st = State::default();
-            let out = poll_with(
-                &[cable(product)],
-                &mut fake::opener(&s),
-                &mut st,
-                Instant::now(),
-            );
+            let out = poll_with(&[cable(product)], &mut s.clone(), &mut st, Instant::now());
             assert_eq!((out[0].name.as_str(), out[0].percent), (product, Some(37)));
-            assert_eq!(s.borrow().writes[0][4], variant);
+            assert_eq!(s.s().writes()[0][4], variant);
         }
         assert_eq!(keyboard_name("VGN S99 2.4G Dongle"), "VGN S99");
     }
@@ -459,16 +447,16 @@ mod tests {
         let mut st = State::default();
         let now = Instant::now();
         let s = device(0, 0, false);
-        let d = &poll_with(&[rx.clone()], &mut fake::opener(&s), &mut st, now)[0];
+        let d = &poll_with(&[rx.clone()], &mut s.clone(), &mut st, now)[0];
         assert_eq!((d.percent, d.via.as_str()), (Some(37), RECEIVER));
         let s = device(0, 0, false);
         let d = &poll_with(
             &[rx],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut st,
             now + Duration::from_secs(60),
         )[0];
-        assert!(s.borrow().writes.is_empty());
+        assert!(s.s().writes().is_empty());
         assert_eq!(d.percent, Some(37));
     }
 }

@@ -13,9 +13,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, ExactFeaturePort, Opener, Port, RECEIVER, RECEIVER_GRACE, colls,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x248A;
 const RECEIVER_PID: u16 = 0xFF4C;
@@ -58,7 +56,7 @@ pub fn decode(r: &[u8], cable: bool) -> Option<Status> {
     Some(Status::Online(r[11], r[12] == 1)) // 0 % is valid
 }
 
-fn query(port: &mut dyn Port, cable: bool) -> Option<Status> {
+fn query(port: &mut dyn Dev, cable: bool) -> Option<Status> {
     let mut request = vec![0u8; STATUS_LEN];
     request[..2].copy_from_slice(&[0x51, 0x06]);
     let deadline = Instant::now() + Duration::from_millis(200);
@@ -67,9 +65,9 @@ fn query(port: &mut dyn Port, cable: bool) -> Option<Status> {
     }
     // An open vendor app can leave unrelated replies here: accept only this command's status frame.
     for _ in 0..20 {
-        port.pause(Duration::from_millis(10));
+        port.sleep(Duration::from_millis(10));
         if let Some(s) = port
-            .get_feature(0x51, STATUS_LEN)
+            .get_feature_len(0x51, STATUS_LEN)
             .and_then(|r| decode(&r, cable))
         {
             return Some(s);
@@ -81,7 +79,10 @@ fn query(port: &mut dyn Port, cable: bool) -> Option<Status> {
     None
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+const KEY: &str = "machenike:l7";
+const NAME: &str = "Machenike L7 Arctic / L7 Mix";
+
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     // A live cable reading takes precedence over the receiver's cached / disconnected state.
     for pid in [CABLE_PID, RECEIVER_PID] {
         let cable = pid == CABLE_PID;
@@ -91,21 +92,20 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
         else {
             continue;
         };
-        let Some(mut port) = open(c) else { continue };
-        let Some((percent, charging)) = (match query(port.as_mut(), cable) {
-            Some(Status::Online(p, ch)) => Some((p, ch)),
-            _ => None, // no reply, or the receiver without its mouse: BatteryHub hides it
-        }) else {
+        let Some(mut port) = hid.open(c) else {
             continue;
         };
         let via = if cable { CABLE } else { RECEIVER };
+        let (percent, charging) = match query(port.as_mut(), cable) {
+            Some(Status::Online(p, ch)) => (p, ch),
+            // The receiver without its mouse: BatteryHub lists it disconnected (hidden at once).
+            Some(Status::Offline) => {
+                return vec![Device::switched_off(KEY, NAME, Kind::Mouse, via)];
+            }
+            None => continue,
+        };
         // Same entry when switching between cable and receiver.
-        let mut d = Device::new(
-            "machenike:l7",
-            "Machenike L7 Arctic / L7 Mix",
-            Kind::Mouse,
-            via,
-        );
+        let mut d = Device::new(KEY, NAME, Kind::Mouse, via);
         d.percent = Some(percent);
         d.charging = charging;
         if !cable {
@@ -116,20 +116,19 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
     Vec::new()
 }
 
-pub fn poll(_api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    let deadline = Instant::now() + BUDGET;
+pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     // Report 51 is 21 bytes; 1001 is the largest other report on this collection, so the feature
     // reports are sent with their exact length, as the official application does.
-    poll_with(&colls(infos), &mut |c: &Coll| {
-        ExactFeaturePort::open(c, deadline).map(|p| Box::new(p) as Box<dyn Port>)
-    })
+    hid::run_exact_features(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, feature_script, reads};
 
+    /// Feature reads go to `feature(state, path, id, len)`; a flush drops queued replies.
+    /// Input and feature reports read.
     const WIRELESS: [u8; 21] = [
         0x51, 0x06, 0x01, 0x00, 0x8A, 0x24, 0x4E, 0xFF, 0x05, 0x01, 0x09, 0x40, 0x00, 0, 0, 0, 0,
         0, 0, 0, 0,
@@ -158,14 +157,12 @@ mod tests {
     }
 
     /// GetFeature 51 returns `replies` in order, then nothing.
-    fn device(replies: Vec<Vec<u8>>) -> fake::Shared {
-        let s = fake::script();
+    fn device(replies: Vec<Vec<u8>>) -> Fake {
         let mut queue = replies.into_iter();
-        s.borrow_mut().feature = Some(Box::new(move |_, id, len| {
+        feature_script(move |_, _, id, len| {
             assert_eq!((id, len), (0x51, STATUS_LEN));
             queue.next()
-        }));
-        s
+        })
     }
 
     #[test]
@@ -175,10 +172,10 @@ mod tests {
         assert_eq!(decode(&OFFLINE, false), Some(Status::Offline));
 
         let s = device(vec![WIRELESS.to_vec()]);
-        let out = poll_with(&[collection(false)], &mut fake::opener(&s));
+        let out = poll_with(&[collection(false)], &mut s.clone());
         let mut request = vec![0u8; 21];
         request[..2].copy_from_slice(&[0x51, 0x06]);
-        assert_eq!(s.borrow().features, vec![request]);
+        assert_eq!(s.s().features(), vec![request]);
         let d = &out[0];
         assert_eq!(
             (d.percent, d.charging, d.via.as_str()),
@@ -187,7 +184,7 @@ mod tests {
         assert_eq!((d.key.as_str(), d.kind), ("machenike:l7", Kind::Mouse));
 
         let s = device(vec![CABLED.to_vec()]);
-        let d = &poll_with(&[collection(true)], &mut fake::opener(&s))[0];
+        let d = &poll_with(&[collection(true)], &mut s.clone())[0];
         assert_eq!(
             (d.percent, d.charging, d.via.as_str()),
             (Some(74), true, CABLE)
@@ -196,24 +193,34 @@ mod tests {
     }
 
     #[test]
-    fn zero_and_full_are_levels_and_offline_is_hidden() {
+    fn zero_and_full_are_levels_and_offline_is_switched_off() {
         for pct in [0u8, 100] {
             let mut r = WIRELESS;
             r[11] = pct;
             assert_eq!(decode(&r, false), Some(Status::Online(pct, false)));
         }
         let s = device(vec![OFFLINE.to_vec()]);
-        assert!(poll_with(&[collection(false)], &mut fake::opener(&s)).is_empty());
+        let out = poll_with(&[collection(false)], &mut s.clone());
+        assert_eq!(out.len(), 1);
+        let d = &out[0];
+        assert_eq!(
+            (d.key.as_str(), d.off, d.percent, d.via.as_str()),
+            ("machenike:l7", true, None, RECEIVER)
+        );
+        // A live cable reading still wins over the receiver's offline state.
+        let s = device(vec![CABLED.to_vec(), OFFLINE.to_vec()]);
+        let out = poll_with(&[collection(true), collection(false)], &mut s.clone());
+        assert_eq!(
+            (out.len(), out[0].off, out[0].via.as_str()),
+            (1, false, CABLE)
+        );
     }
 
     #[test]
     fn cable_wins() {
         let s = device(vec![CABLED.to_vec()]);
-        let out = poll_with(
-            &[collection(true), collection(false)],
-            &mut fake::opener(&s),
-        );
-        assert_eq!((out.len(), s.borrow().features.len()), (1, 1));
+        let out = poll_with(&[collection(true), collection(false)], &mut s.clone());
+        assert_eq!((out.len(), s.s().features().len()), (1, 1));
         assert_eq!(out[0].via, CABLE);
     }
 
@@ -233,8 +240,8 @@ mod tests {
                 _ => c.product = "Unrelated mouse".into(),
             }
             let s = device(vec![WIRELESS.to_vec()]);
-            assert!(poll_with(&[c], &mut fake::opener(&s)).is_empty());
-            assert!(s.borrow().opened.is_empty());
+            assert!(poll_with(&[c], &mut s.clone()).is_empty());
+            assert!(s.s().opened.is_empty());
         }
     }
 
@@ -262,16 +269,16 @@ mod tests {
             vec![0; 12],
             WIRELESS.to_vec(),
         ]);
-        let out = poll_with(&[collection(false)], &mut fake::opener(&s));
+        let out = poll_with(&[collection(false)], &mut s.clone());
         assert_eq!(out[0].percent, Some(64));
-        assert!(s.borrow().reads >= 8);
+        assert!(reads(&s) >= 8);
     }
 
     #[test]
     fn missing_reply_is_bounded() {
         let s = device(vec![]);
         let start = Instant::now();
-        assert!(poll_with(&[collection(false)], &mut fake::opener(&s)).is_empty());
+        assert!(poll_with(&[collection(false)], &mut s.clone()).is_empty());
         assert!(start.elapsed() < Duration::from_millis(800));
     }
 }
