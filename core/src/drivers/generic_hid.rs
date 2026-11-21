@@ -175,7 +175,14 @@ pub fn poll(_api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
         .map(|i| (i.vendor_id(), i.product_id()))
         .collect();
     let mut out: Vec<Device> = Vec::new();
+    // A device that stalls on GET_REPORT must not push the whole fallback past the registry's
+    // 5 s deadline: stop starting new collections after this budget and keep what was read.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     for info in infos {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("generic-hid: time budget used up, remaining collections skipped this poll");
+            break;
+        }
         let (vid, pid) = (info.vendor_id(), info.product_id());
         let key = format!("hid:{vid:04X}:{pid:04X}");
         if out.iter().any(|d| d.key == key) || digitizers.contains(&(vid, pid)) {

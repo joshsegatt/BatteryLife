@@ -160,10 +160,11 @@ pub fn poll(
         if !has_bt {
             return Vec::new();
         }
-        results
-            .iter()
-            .filter(|(i, ds)| pred(*i) && !ds.is_empty())
-            .flat_map(|(i, _)| &assigned[*i])
+        // Every collection a vendor driver handles counts, even when it returned nothing this poll
+        // (asleep): the tracker still shows that device, so its Bluetooth copy must stay hidden.
+        (0..assigned.len())
+            .filter(|i| pred(*i))
+            .flat_map(|i| &assigned[i])
             .filter_map(|info| bluetooth::container_of(info.path()))
             .map(|c| format!("bt:{c}"))
             .collect()
@@ -209,6 +210,10 @@ pub fn dedup(
     let bt_xbox = devices
         .iter()
         .any(|d| d.key.starts_with("bt:") && d.name.contains("Xbox"));
+    // Microsoft (045E) pads read by the Xbox source are not repeated by the generic HID fallback.
+    let xbox_listed = devices
+        .iter()
+        .any(|d| d.key.starts_with("xbox:") || d.key.starts_with("xinput:"));
     devices
         .into_iter()
         .filter(|d| {
@@ -216,6 +221,9 @@ pub fn dedup(
                 return !vendor_bt_keys.contains(&d.key);
             }
             if d.key.starts_with("hid:") {
+                if xbox_listed && d.key.starts_with("hid:045E:") {
+                    return false;
+                }
                 return !generic_to_bt.iter().any(|(h, b)| {
                     *h == d.key && bt_keys.contains(b) && !vendor_bt_keys.contains(b)
                 });
@@ -317,6 +325,21 @@ mod tests {
         assert_eq!(out.len(), 1);
         let out = dedup(vec![dev("xinput:0", "Controller 1")], &[], &[]);
         assert_eq!(out.len(), 1, "no Bluetooth Xbox: keep XInput");
+    }
+
+    #[test]
+    fn generic_hid_does_not_repeat_an_xbox_pad() {
+        let out = dedup(
+            vec![
+                dev("hid:045E:0B13", "Controller"),
+                dev("xbox:0B13:0", "Xbox Wireless Controller"),
+                dev("hid:1234:0001", "Keyboard"),
+            ],
+            &[],
+            &[],
+        );
+        let keys: Vec<&str> = out.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["xbox:0B13:0", "hid:1234:0001"]);
     }
 
     static TWO: &[HidDriver] = &[

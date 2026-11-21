@@ -103,6 +103,8 @@ fn poll_wgi() -> Vec<Device> {
     out
 }
 
+/// Coarse fallback. XInput exposes no hardware id, so entries are keyed by player slot: a pad that
+/// reconnects into another slot shows up as a different row until the old one's grace runs out.
 fn poll_xinput() -> Vec<Device> {
     let mut out = Vec::new();
     for user in 0..4u32 {
