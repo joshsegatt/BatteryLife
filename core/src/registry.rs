@@ -845,6 +845,9 @@ pub fn poll(
     // detached (and is skipped by later polls until it returns); its result is discarded when it
     // finally arrives. The generic fallback runs last, on what no vendor driver reported, so an
     // unknown model of a whole-vendor match can still be read through standard HID.
+    // One deadline for all rounds: a chain's later candidates get what is left, so a poll never
+    // takes longer than `timeout` (plus the quick generic fallback) however long the chain is.
+    let drivers_deadline = Instant::now() + timeout;
     let (mut results, fallback_infos) = route(&infos, cands, |jobs| {
         let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
         let mut started = Vec::new();
@@ -858,7 +861,7 @@ pub fn poll(
             }
         }
         drop(tx);
-        let got = collect(&rx, started.len(), Instant::now() + timeout);
+        let got = collect(&rx, started.len(), drivers_deadline);
         jobs.iter()
             .map(|(i, _)| {
                 let d = got.iter().find(|(r, _)| r == i).map(|(_, d)| d.clone());
