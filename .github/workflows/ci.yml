@@ -48,3 +48,18 @@ jobs:
       - name: Smoke test (app starts and stays up)
         shell: pwsh
         run: ./tools/smoke.ps1 (Get-ChildItem BatteryLife.App/bin/x64/Release -Recurse -Filter BatteryLife.exe | Select-Object -First 1).FullName
+
+  # Compiles the installer script against a stub app folder, so a broken .iss fails here instead of
+  # at the next release tag.
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install Inno Setup
+        run: choco install innosetup --version 6.7.1 -y --no-progress
+      - name: Compile the installer script
+        shell: pwsh
+        run: |
+          $stub = New-Item -ItemType Directory "$env:RUNNER_TEMP\stub" -Force
+          New-Item -ItemType File "$stub\BatteryLife.exe" -Force | Out-Null
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DSourceDir=$stub" "/DOutputDir=$env:RUNNER_TEMP" installer\BatteryLife.iss
