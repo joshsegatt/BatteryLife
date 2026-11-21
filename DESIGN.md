@@ -217,13 +217,21 @@ The single next decision. A 56px pictogram square on the left, then headline, fi
 - **Style:** a 64px generated tile carrying the level of the device that runs out first in Segoe UI Variable Display Bold (40px for one character, 34px for two, 26px for three); "!" when the reader is down, "–" when unknown.
 - **Action:** yellow tile, ink number. **Calm:** raised tile, white number.
 
+### Device tray icons
+One more tray icon per device (up to 4), so the main devices can sit on the taskbar beside the main icon.
+- **Order:** fixed by kind (mouse, headset, keyboard, controller, phone, other), then name, never by level, so each icon keeps its place.
+- **Style:** drawn at the tray's real pixel size (16px at 100% scale), on the main icon's tile (corner radius 10% of its size). The device's Segoe Fluent pictogram (56% of the tile) sits above a level bar: track at 35% of the ink, fill in full ink, width proportional to the level, no fill when the level is unknown.
+- **Action:** yellow tile, ink pictogram and bar, the same rule as the band and the row tag. **Calm:** raised tile, white pictogram and bar. **Asleep:** ink at 55% opacity, like the row.
+- **Why a bar and not a number:** at 16px a tile holds a pictogram or two digits, not both, and the pictogram is what tells four icons apart. The exact level and time left live in the tooltip ("PRO X2: 86% · 21 h"). This is the one place a level is shown as a bar; in the panel, levels stay figures.
+- **Behavior:** click opens or closes the hub; right click shows the main icon's menu.
+
 ### Window
 - **Open:** rises 14px to rest over 260ms (exponential ease-out) while fading in over 160ms; skipped when animation effects are off. Closes instantly on focus loss or Escape.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** reserve sign-yellow for the act-now plate, the needing-charge level tag and the tray icon in the same state.
+- **Do** reserve sign-yellow for the act-now plate, the needing-charge level tag and the tray icons (main and per device) in the same state.
 - **Do** keep pictograms white on a dark square (ink on yellow, raised or rule on black), from Segoe Fluent Icons only.
 - **Do** set figures with digits at full size and weight and units smaller and lighter (40px/700 against 24px/600).
 - **Do** keep plates square and let only Windows-owned silhouettes (frame, tray tile, app icon) round.

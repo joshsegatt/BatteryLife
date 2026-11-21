@@ -15,11 +15,14 @@ namespace BatteryLife.App;
 /// bar, yellow only when it needs charging (the band's rule). A click opens the hub, a right click
 /// shows the same menu as the main icon, and hovering names the device and its level.
 /// </summary>
-public sealed class DeviceTrayIcons(Text text, ICommand toggleHub, MenuFlyout menu) : IDisposable
+/// <param name="menu">Builds the right-click menu; each icon gets its own instance.</param>
+public sealed class DeviceTrayIcons(Text text, ICommand toggleHub, Func<MenuFlyout> menu) : IDisposable
 {
     private sealed record Slot(TaskbarIcon Tray, Icon Icon, string Look);
 
     private readonly Dictionary<string, Slot> _slots = [];
+    // Kept per device so a device that comes back reuses its menu instead of building another.
+    private readonly Dictionary<string, MenuFlyout> _menus = [];
     private IReadOnlyList<DeviceReading> _last = [];
 
     public void Update(IReadOnlyList<DeviceReading> devices)
@@ -32,37 +35,57 @@ public sealed class DeviceTrayIcons(Text text, ICommand toggleHub, MenuFlyout me
         int size = TrayIconSize();
         foreach (var d in shown)
         {
-            bool action = Text.NeedsCharge(d);
-            // Redraw only when what the icon shows changes, not on every poll.
-            string look = $"{size}|{d.Kind}|{d.Percent}|{action}|{d.Asleep}|{Palette.HighContrast}";
-            string tip = text.DeviceLine(d);
-            if (_slots.TryGetValue(d.Key, out var slot))
+            try
             {
-                slot.Tray.ToolTipText = tip;
-                if (slot.Look == look) continue;
-                var icon = Paint(d, action, size);
-                slot.Tray.Icon = icon;
-                slot.Icon.Dispose(); // the shell keeps its own copy of the previous icon
-                _slots[d.Key] = slot with { Icon = icon, Look = look };
+                Show(d, size);
             }
-            else
+            catch (Exception e)
             {
-                var icon = Paint(d, action, size);
-                var tray = new TaskbarIcon
-                {
-                    // Stable per device and install path, so Windows remembers where the user put it.
-                    Id = H.NotifyIcon.Core.TrayIcon.CreateUniqueGuidFromString($"{Environment.ProcessPath}|{d.Key}"),
-                    ToolTipText = tip,
-                    NoLeftClickDelay = true,
-                    LeftClickCommand = toggleHub,
-                    ContextMenuMode = ContextMenuMode.PopupMenu,
-                    ContextFlyout = menu,
-                    Icon = icon,
-                };
-                tray.ForceCreate(enablesEfficiencyMode: false);
-                _slots[d.Key] = new Slot(tray, icon, look);
+                // One icon that cannot be drawn or added (shell not ready yet, GDI limits) must not
+                // take down the hub and the main icon; the next reading tries again.
+                System.Diagnostics.Debug.WriteLine($"device tray icon {d.Key}: {e.Message}");
             }
         }
+    }
+
+    private void Show(DeviceReading d, int size)
+    {
+        bool action = Text.NeedsCharge(d);
+        // Redraw only when what the icon shows changes, not on every poll.
+        string look = $"{size}|{d.Kind}|{d.Percent}|{action}|{d.Asleep}|{Palette.HighContrast}";
+        string tip = text.DeviceLine(d);
+        if (_slots.TryGetValue(d.Key, out var slot))
+        {
+            slot.Tray.ToolTipText = tip;
+            if (slot.Look == look) return;
+            var icon = Paint(d, action, size);
+            slot.Tray.Icon = icon;
+            slot.Icon.Dispose(); // the shell keeps its own copy of the previous icon
+            _slots[d.Key] = slot with { Icon = icon, Look = look };
+        }
+        else
+        {
+            var icon = Paint(d, action, size);
+            var tray = new TaskbarIcon
+            {
+                // Stable per device and install path, so Windows remembers where the user put it.
+                Id = H.NotifyIcon.Core.TrayIcon.CreateUniqueGuidFromString($"{Environment.ProcessPath}|{d.Key}"),
+                ToolTipText = tip,
+                NoLeftClickDelay = true,
+                LeftClickCommand = toggleHub,
+                ContextMenuMode = ContextMenuMode.PopupMenu,
+                ContextFlyout = MenuFor(d.Key),
+                Icon = icon,
+            };
+            tray.ForceCreate(enablesEfficiencyMode: false);
+            _slots[d.Key] = new Slot(tray, icon, look);
+        }
+    }
+
+    private MenuFlyout MenuFor(string key)
+    {
+        if (!_menus.TryGetValue(key, out var m)) _menus[key] = m = menu();
+        return m;
     }
 
     /// <summary>A contrast theme or a display scale change: draw every icon again.</summary>
@@ -85,7 +108,8 @@ public sealed class DeviceTrayIcons(Text text, ICommand toggleHub, MenuFlyout me
         _slots.Remove(key);
     }
 
-    /// <summary>Pictogram on top, level bar at the bottom, on the sign's rounded square.</summary>
+    /// <summary>Pictogram on top, level bar at the bottom, on the same tile as the main tray icon
+    /// (corner radius 10% of its size, see DESIGN.md).</summary>
     private static Icon Paint(DeviceReading d, bool action, int size)
     {
         var background = Color(action ? "SignYellowBrush" : "SignRaisedBrush");
@@ -100,7 +124,7 @@ public sealed class DeviceTrayIcons(Text text, ICommand toggleHub, MenuFlyout me
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(System.Drawing.Color.Transparent);
 
-            using (var square = RoundedSquare(size, size * 0.2f))
+            using (var square = RoundedSquare(size, size * 0.1f))
             using (var fill = new SolidBrush(background))
                 g.FillPath(fill, square);
 

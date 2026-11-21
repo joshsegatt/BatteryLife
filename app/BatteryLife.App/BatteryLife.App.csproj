@@ -23,6 +23,8 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2957" />
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.1" />
+    <!-- Draws the per-device tray icons (DeviceTrayIcons.cs); H.NotifyIcon already brings this version. -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
     <!-- Windows App SDK parts the app never calls (on-device AI, ML, semantic search, widgets).
          Excluding them here, plus DropUnusedWinAppSdkParts below, keeps about 58 MB out of the
          install. Bump these versions together with Microsoft.WindowsAppSDK, or the build fails

@@ -29,6 +29,7 @@ public partial class App : Application
     private bool _openOnFirstUpdate;
     private bool _demo;
     private Board? _lastBoard;
+    private readonly List<ToggleMenuFlyoutItem> _startupToggles = [];
 
     public App() => InitializeComponent();
 
@@ -53,25 +54,17 @@ public partial class App : Application
         _flyout = new FlyoutWindow(_text, () => _core?.Refresh(), Quit);
 
         // Left click opens the hub; right click shows the native Windows menu, as tray users expect.
-        var startup = new ToggleMenuFlyoutItem { Text = _text.StartWithWindows, IsChecked = Startup.IsEnabled };
-        startup.Command = new Command(() => { Startup.Set(!Startup.IsEnabled); startup.IsChecked = Startup.IsEnabled; });
-        var menu = new MenuFlyout();
-        menu.Items.Add(new MenuFlyoutItem { Text = _text.Open, Command = new Command(() => _flyout.Toggle()) });
-        menu.Items.Add(new MenuFlyoutItem { Text = _text.Refresh, Command = new Command(() => _core?.Refresh()) });
-        menu.Items.Add(startup);
-        menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(new MenuFlyoutItem { Text = _text.Exit, Command = new Command(Quit) });
         _tray = new TaskbarIcon
         {
             ToolTipText = "BatteryLife",
             NoLeftClickDelay = true,
             LeftClickCommand = new Command(() => _flyout.Toggle()),
             ContextMenuMode = ContextMenuMode.PopupMenu,
-            ContextFlyout = menu,
+            ContextFlyout = Menu(),
             IconSource = TrayIcon(Board.From([])),
         };
         _tray.ForceCreate(enablesEfficiencyMode: false);
-        _deviceIcons = new DeviceTrayIcons(_text, _tray.LeftClickCommand, menu);
+        _deviceIcons = new DeviceTrayIcons(_text, _tray.LeftClickCommand, Menu);
 
         try
         {
@@ -132,6 +125,26 @@ public partial class App : Application
             }
         });
         _core.Start();
+    }
+
+    /// <summary>The right-click menu. Each tray icon gets its own instance; the startup toggles stay
+    /// in step because every one reads and writes the same Run key.</summary>
+    private MenuFlyout Menu()
+    {
+        var startup = new ToggleMenuFlyoutItem { Text = _text.StartWithWindows, IsChecked = Startup.IsEnabled };
+        startup.Command = new Command(() =>
+        {
+            Startup.Set(!Startup.IsEnabled);
+            foreach (var t in _startupToggles) t.IsChecked = Startup.IsEnabled;
+        });
+        _startupToggles.Add(startup);
+        var menu = new MenuFlyout();
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Open, Command = new Command(() => _flyout?.Toggle()) });
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Refresh, Command = new Command(() => _core?.Refresh()) });
+        menu.Items.Add(startup);
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Exit, Command = new Command(Quit) });
+        return menu;
     }
 
     private void OnDevices(IReadOnlyList<DeviceReading> devices)
