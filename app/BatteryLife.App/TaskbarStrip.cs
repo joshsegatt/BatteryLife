@@ -37,7 +37,7 @@ public sealed class TaskbarStrip : IDisposable
     private Size _size;
     private int _lastLeft = int.MinValue, _lastDpi;
     private bool _hover;
-    private string _painted = ""; // what the strip shows now, so the timer redraws only on change
+    private string _painted = "", _tipShown = ""; // what the strip shows now, so the timer redraws only on change
     private readonly TaskbarLayout _layout = new();
     private bool _fits; // false while there is no room for even one device
 
@@ -169,7 +169,6 @@ public sealed class TaskbarStrip : IDisposable
         if (look != _painted)
         {
             _fits = Paint(items, dpi, light, room);
-            if (_fits) SetTooltip(tip);
             _painted = look;
             _lastLeft = int.MinValue;
         }
@@ -178,6 +177,7 @@ public sealed class TaskbarStrip : IDisposable
             ShowWindow(_strip, SwHide); // the app buttons fill the taskbar: never cover them
             return;
         }
+        if (tip != _tipShown) SetTooltip(tip); // time left changes without changing the look
         Place(right, dpi);
     }
 
@@ -188,12 +188,16 @@ public sealed class TaskbarStrip : IDisposable
         right = room = 0;
         var tray = FindWindowEx(_taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
         if (tray == IntPtr.Zero || !GetWindowRect(tray, out var trayRect) || !GetWindowRect(_taskbar, out var barRect)) return false;
+        if (!_layout.Measured) return false; // never place it before knowing where the app buttons end
         right = trayRect.Left;
         int left = barRect.Left;
         if (_layout.TasksRight is int tasks) left = tasks + Scale(8, dpi);
         var widgets = _layout.Widgets;
-        if (widgets.Right > widgets.Left && widgets.Left >= left && widgets.Left < right)
-            right = widgets.Left; // weather button between the apps and the tray
+        // A left-aligned taskbar puts the weather button next to the tray; centered keeps it at
+        // the far left, where it must not count.
+        bool nearTray = widgets.Left > (barRect.Left + barRect.Right) / 2;
+        if (widgets.Right > widgets.Left && nearTray && widgets.Left >= left && widgets.Left < right)
+            right = widgets.Left;
         room = right - Scale(4, dpi) - left;
         return true;
     }
@@ -207,7 +211,7 @@ public sealed class TaskbarStrip : IDisposable
         if (_strip == IntPtr.Zero) return false;
         _lastLeft = int.MinValue;
         _lastDpi = 0;
-        _painted = "";
+        _painted = _tipShown = "";
         _layout.Watch(_taskbar);
 
         _tooltip = CreateWindowEx(WsExTopmost, "tooltips_class32", null, TtsAlwaysTip | TtsNoPrefix,
@@ -438,6 +442,7 @@ public sealed class TaskbarStrip : IDisposable
 
     private void SetTooltip(string text)
     {
+        _tipShown = text;
         if (_tooltip == IntPtr.Zero) return;
         var info = ToolInfo(text);
         SendMessage(_tooltip, TtmUpdateTipText, IntPtr.Zero, ref info);
@@ -469,6 +474,7 @@ public sealed class TaskbarStrip : IDisposable
         private IntPtr _taskbar;
         private Rect _widgets;
         private int? _tasksRight;
+        private bool _measured;
         private Thread? _thread;
         private volatile bool _stop;
 
@@ -476,6 +482,12 @@ public sealed class TaskbarStrip : IDisposable
         public Rect Widgets
         {
             get { lock (_gate) return _widgets; }
+        }
+
+        /// <summary>True once a lookup for the current taskbar has finished (or failed trying).</summary>
+        public bool Measured
+        {
+            get { lock (_gate) return _measured; }
         }
 
         /// <summary>Screen x of the right edge of the rightmost app button left of the tray, if known.</summary>
@@ -491,6 +503,7 @@ public sealed class TaskbarStrip : IDisposable
                 _taskbar = taskbar;
                 _widgets = default;
                 _tasksRight = null;
+                _measured = false;
             }
             if (_thread is null && taskbar != IntPtr.Zero)
             {
@@ -549,6 +562,7 @@ public sealed class TaskbarStrip : IDisposable
                     {
                         _widgets = widgets;
                         _tasksRight = tasksRight;
+                        _measured = true;
                     }
                 }
                 _wake.WaitOne(3000);
