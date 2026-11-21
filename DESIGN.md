@@ -217,13 +217,22 @@ The single next decision. A 56px pictogram square on the left, then headline, fi
 - **Style:** a 64px generated tile carrying the level of the device that runs out first in Segoe UI Variable Display Bold (40px for one character, 34px for two, 26px for three); "!" when the reader is down, "–" when unknown.
 - **Action:** yellow tile, ink number. **Calm:** raised tile, white number.
 
+### Taskbar strip
+The main devices inside the taskbar itself, just left of the tray icons, always visible: each device's pictogram and level, like a departures line.
+- **Order:** fixed by kind (mouse, headset, keyboard, controller, phone, other), then name, never by level, so each device keeps its place. Up to 4.
+- **Style:** Segoe Fluent pictogram (16px at 100% scale), 4px gap, level in Segoe UI Variable Text Bold 14px; 6px padding per device, 2px between devices. No background: the taskbar shows through, and the ink follows the taskbar theme (white on a dark taskbar, #111111 on a light one). Hover draws a faint rounded highlight like the tray's own buttons.
+- **Action:** a square sign-yellow plate (28px high) behind that one device, ink pictogram and level: the same rule as the band and the row tag. **Charging:** a bolt glyph (11px) before the level. **Asleep:** pictogram and level at 55% opacity, like the row.
+- **Room:** it never covers an app button. When the apps leave too little room, a device that needs charging is kept first, then the others in their order; with no room for one, the strip hides and the hub still lists every device.
+- **Behavior:** click opens or closes the hub; right click shows the tray icon's menu, which can also turn the strip off; hovering lists each device with its level and time left.
+- **Contrast themes:** window text, highlight and highlight text system colors instead of white, yellow and ink.
+
 ### Window
 - **Open:** rises 14px to rest over 260ms (exponential ease-out) while fading in over 160ms; skipped when animation effects are off. Closes instantly on focus loss or Escape.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** reserve sign-yellow for the act-now plate, the needing-charge level tag and the tray icon in the same state.
+- **Do** reserve sign-yellow for the act-now plate, the needing-charge level tag and the tray icon and the strip plate in the same state.
 - **Do** keep pictograms white on a dark square (ink on yellow, raised or rule on black), from Segoe Fluent Icons only.
 - **Do** set figures with digits at full size and weight and units smaller and lighter (40px/700 against 24px/600).
 - **Do** keep plates square and let only Windows-owned silhouettes (frame, tray tile, app icon) round.

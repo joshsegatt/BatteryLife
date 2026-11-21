@@ -8,6 +8,7 @@ or C#, and each ported file names its source in its header comment.
 
 | BatteryLife file | Ported from (BatteryHub, commit `fd2267d`) |
 |---|---|
+| `app/BatteryLife.App/TaskbarStrip.cs` | Technique of `src/widget.cpp`: layered child window of the taskbar, one-second reposition timer, recreate on TaskbarCreated, UI Automation lookups (Widgets button, app buttons) on a separate thread |
 | `core/src/drivers/logitech.rs` | `src/drivers/logitech.cpp` |
 | `core/src/drivers/phonelink.rs` | `src/drivers/phonelink.cpp`, `src/drivers/phonelink_protocol.h` |
 | `core/src/drivers/bluetooth.rs` | `src/drivers/generic.cpp` (PollBluetooth) |

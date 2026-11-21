@@ -120,8 +120,8 @@ public sealed class Text
 
     public string WelcomeTitle => T("O BatteryLife está na bandeja", "BatteryLife is in the tray");
     public string WelcomeBody => T(
-        "Para ver a bateria sempre, abra a seta ^ perto do relógio e arraste o ícone amarelo para a barra.",
-        "To always see your battery, open the ^ arrow next to the clock and drag the yellow icon onto the taskbar.");
+        "Seus aparelhos aparecem na barra de tarefas, ao lado do relógio. Clique neles para abrir o painel.",
+        "Your devices show on the taskbar, next to the clock. Click them to open the hub.");
 
     public string NotificationTitle(DeviceReading d) => T($"{d.Name} com {d.Percent}%", $"{d.Name} at {d.Percent}%");
     public string NotificationBody(DeviceReading d) => d.MinutesLeft is int m
@@ -131,8 +131,19 @@ public sealed class Text
     /// <summary>Tray tooltip: one line per device.</summary>
     public string Tooltip(IReadOnlyList<DeviceReading> devices) => devices.Count == 0
         ? "BatteryLife"
-        : string.Join("\n", devices.Select(d => $"{d.Name}: {Level(d)}{(d.Charging ? T(", carregando", ", charging") : "")}"));
+        : string.Join("\n", devices.Select(DeviceLine));
+
+    /// <summary>"PRO X2: 86%", "Headset: 40%, charging", "Mouse: 12% · 48 min": one device's tray line,
+    /// also the tooltip of its own tray icon.</summary>
+    public string DeviceLine(DeviceReading d)
+    {
+        string line = $"{d.Name}: {Level(d)}";
+        if (d.Charging) return line + T(", carregando", ", charging");
+        if (d.Asleep) return line + T(" (último valor)", " (last value)");
+        return d.MinutesLeft is int m ? $"{line} · {Duration(m)}" : line;
+    }
 
     public string Open => T("Abrir", "Open");
+    public string ShowOnTaskbar => T("Mostrar na barra de tarefas", "Show on the taskbar");
     public string PinIcon => T("Fixar na barra", "Pin to taskbar");
 }

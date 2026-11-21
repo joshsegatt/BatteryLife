@@ -22,6 +22,7 @@ public partial class App : Application
     private Text _text = Text.For(CultureInfo.CurrentUICulture);
     private FlyoutWindow? _flyout;
     private TaskbarIcon? _tray;
+    private TaskbarStrip? _strip;
     private CoreClient? _core;
     private readonly AlertRules _alerts = new();
     private bool _toasts;
@@ -52,24 +53,21 @@ public partial class App : Application
         _flyout = new FlyoutWindow(_text, () => _core?.Refresh(), Quit);
 
         // Left click opens the hub; right click shows the native Windows menu, as tray users expect.
-        var startup = new ToggleMenuFlyoutItem { Text = _text.StartWithWindows, IsChecked = Startup.IsEnabled };
-        startup.Command = new Command(() => { Startup.Set(!Startup.IsEnabled); startup.IsChecked = Startup.IsEnabled; });
-        var menu = new MenuFlyout();
-        menu.Items.Add(new MenuFlyoutItem { Text = _text.Open, Command = new Command(() => _flyout.Toggle()) });
-        menu.Items.Add(new MenuFlyoutItem { Text = _text.Refresh, Command = new Command(() => _core?.Refresh()) });
-        menu.Items.Add(startup);
-        menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(new MenuFlyoutItem { Text = _text.Exit, Command = new Command(Quit) });
         _tray = new TaskbarIcon
         {
             ToolTipText = "BatteryLife",
             NoLeftClickDelay = true,
             LeftClickCommand = new Command(() => _flyout.Toggle()),
             ContextMenuMode = ContextMenuMode.PopupMenu,
-            ContextFlyout = menu,
+            ContextFlyout = Menu(),
             IconSource = TrayIcon(Board.From([])),
         };
         _tray.ForceCreate(enablesEfficiencyMode: false);
+        // The levels inside the taskbar itself, left of the tray icons. Its events come from its own
+        // thread; the hub and the menu belong to this one.
+        _strip = new TaskbarStrip(
+            click: () => _ui.TryEnqueue(() => _flyout.Toggle()),
+            rightClick: at => _ui.TryEnqueue(() => _tray?.ShowContextMenu(at)));
 
         try
         {
@@ -120,6 +118,7 @@ public partial class App : Application
             _flyout.Render(_lastBoard);
             _tray.IconSource = TrayIcon(_lastBoard);
             _tray.ToolTipText = $"BatteryLife: {_text.CoreMissing}";
+            _strip?.Update([], ""); // levels are unknown now, not stale
             System.Diagnostics.Debug.WriteLine(message);
             if (_openOnFirstUpdate)
             {
@@ -128,6 +127,32 @@ public partial class App : Application
             }
         });
         _core.Start();
+    }
+
+    /// <summary>The right-click menu of the tray icon, also shown by a right click on the strip.</summary>
+    private MenuFlyout Menu()
+    {
+        var startup = new ToggleMenuFlyoutItem { Text = _text.StartWithWindows, IsChecked = Startup.IsEnabled };
+        startup.Command = new Command(() =>
+        {
+            Startup.Set(!Startup.IsEnabled);
+            startup.IsChecked = Startup.IsEnabled;
+        });
+        var menu = new MenuFlyout();
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Open, Command = new Command(() => _flyout?.Toggle()) });
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Refresh, Command = new Command(() => _core?.Refresh()) });
+        menu.Items.Add(startup);
+        var strip = new ToggleMenuFlyoutItem { Text = _text.ShowOnTaskbar, IsChecked = TaskbarStrip.Enabled };
+        strip.Command = new Command(() =>
+        {
+            TaskbarStrip.Enabled = !TaskbarStrip.Enabled;
+            strip.IsChecked = TaskbarStrip.Enabled;
+            _strip?.Refresh();
+        });
+        menu.Items.Add(strip);
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(new MenuFlyoutItem { Text = _text.Exit, Command = new Command(Quit) });
+        return menu;
     }
 
     private void OnDevices(IReadOnlyList<DeviceReading> devices)
@@ -140,6 +165,10 @@ public partial class App : Application
             _tray.IconSource = TrayIcon(board);
             _tray.ToolTipText = _text.Tooltip(devices);
         }
+        var shown = TrayDevices.Pick(devices);
+        _strip?.Update(
+            shown.Select(d => new TaskbarStrip.Item(Pictograms.For(d.Kind), _text.Level(d), Text.NeedsCharge(d), d.Charging, d.Asleep)).ToList(),
+            string.Join('\n', shown.Select(_text.DeviceLine)));
         if (!_demo)
             foreach (var d in _alerts.Check(devices)) Notify(d);
         if (_openOnFirstUpdate)
@@ -195,6 +224,7 @@ public partial class App : Application
     {
         _core?.Dispose();
         if (_toasts) AppNotificationManager.Default.Unregister();
+        _strip?.Dispose();
         _tray?.Dispose();
         _flyout?.Close();
         _single?.ReleaseMutex();
