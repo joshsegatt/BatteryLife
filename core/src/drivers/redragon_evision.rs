@@ -10,19 +10,19 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0.
 
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
 use crate::drivers::atk_keyboard::{evision_read, next_seq};
-use crate::drivers::hidport::{BUDGET, Coll, Opener, RECEIVER, RECEIVER_GRACE, colls, hid_opener};
+use crate::drivers::hid::{self, Coll, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x320F;
 pub const PIDS: &[u16] = &[0x226F];
 
 /// `seq` is the previous request's sequence; the next one is used.
-pub fn poll_with(colls: &[Coll], open: &mut Opener, seq: &mut u16) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid, seq: &mut u16) -> Vec<Device> {
     let Some(c) = colls
         .iter()
         .find(|c| c.is(VID, 0x226F) && c.page == 0xFF1C && c.usage == 0x0092)
@@ -38,7 +38,10 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener, seq: &mut u16) -> Vec<Device
     );
     d.grace = RECEIVER_GRACE;
     let s = next_seq(seq);
-    match open(c).and_then(|mut p| evision_read(p.as_mut(), s, 0x02, Duration::from_secs(1))) {
+    match hid
+        .open(c)
+        .and_then(|mut p| evision_read(p.as_mut(), s, 0x02, Duration::from_secs(1)))
+    {
         Some((p, ch)) => (d.percent, d.charging) = (Some(p), ch),
         None => d.asleep = true, // asleep, off or busy: keep the last value
     }
@@ -49,11 +52,7 @@ static SEQ: AtomicU16 = AtomicU16::new(0);
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut seq = SEQ.load(Ordering::Relaxed);
-    let out = poll_with(
-        &colls(infos),
-        &mut hid_opener(api, Instant::now() + BUDGET),
-        &mut seq,
-    );
+    let out = hid::run(api, infos, |hid, colls| poll_with(colls, hid, &mut seq));
     SEQ.store(seq, Ordering::Relaxed);
     out
 }
@@ -61,8 +60,11 @@ pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, at, coll};
 
+    use crate::drivers::hid::fake::{at, coll, per_write, reads, script};
+
+    /// A flush drops queued replies, as on the device.
+    /// Input and feature reports read.
     fn report(head: &[u8]) -> Vec<u8> {
         let mut r = head.to_vec();
         r.resize(64, 0);
@@ -85,11 +87,11 @@ mod tests {
 
     #[test]
     fn captured_request_and_reply() {
-        let s = fake::per_write(vec![vec![captured(1)]]);
+        let s = per_write(vec![vec![captured(1)]]);
         let mut seq = 0;
-        let out = poll_with(&colls(), &mut fake::opener(&s), &mut seq);
-        assert_eq!(s.borrow().opened, vec!["vendor".to_string()]);
-        let w = &s.borrow().writes[0];
+        let out = poll_with(&colls(), &mut s.clone(), &mut seq);
+        assert_eq!(s.s().opened, vec!["vendor".to_string()]);
+        let w = &s.s().writes()[0];
         assert_eq!((w.len(), w[0], w[3], w[4]), (32, 0x04, 0x1A, 0x02));
         let d = &out[0];
         assert_eq!((d.percent, d.charging, d.asleep), (Some(97), false, false));
@@ -109,10 +111,10 @@ mod tests {
         wrong_cmd[3] = 0x1B;
         let mut non_zero = good.clone();
         non_zero[5] = 1;
-        let s = fake::per_write(vec![vec![ping, wrong_seq, wrong_cmd, non_zero, good]]);
+        let s = per_write(vec![vec![ping, wrong_seq, wrong_cmd, non_zero, good]]);
         let mut seq = 1;
-        let out = poll_with(&colls(), &mut fake::opener(&s), &mut seq);
-        assert_eq!((out[0].percent, s.borrow().reads), (Some(97), 5));
+        let out = poll_with(&colls(), &mut s.clone(), &mut seq);
+        assert_eq!((out[0].percent, reads(&s)), (Some(97), 5));
     }
 
     #[test]
@@ -120,37 +122,37 @@ mod tests {
         let mut r = captured(3);
         r[8] = 55;
         r[9] = 1;
-        let s = fake::per_write(vec![vec![r]]);
+        let s = per_write(vec![vec![r]]);
         let mut seq = 2;
-        let d = &poll_with(&colls(), &mut fake::opener(&s), &mut seq)[0];
+        let d = &poll_with(&colls(), &mut s.clone(), &mut seq)[0];
         assert_eq!((d.percent, d.charging), (Some(55), true));
 
         let mut r = captured(4);
         r[8] = 0xFF;
-        let s = fake::per_write(vec![vec![r]]);
-        let d = &poll_with(&colls(), &mut fake::opener(&s), &mut seq)[0];
+        let s = per_write(vec![vec![r]]);
+        let d = &poll_with(&colls(), &mut s.clone(), &mut seq)[0];
         assert!(d.asleep && d.percent.is_none() && d.grace > Duration::ZERO);
 
-        let d = &poll_with(&colls(), &mut fake::opener(&fake::script()), &mut seq)[0];
+        let d = &poll_with(&colls(), &mut script(), &mut seq)[0];
         assert!(d.asleep);
 
-        let s = fake::script();
-        s.borrow_mut().fail_open = true;
-        assert!(poll_with(&colls(), &mut fake::opener(&s), &mut seq)[0].asleep);
-        let s = fake::script();
-        s.borrow_mut().fail_write = true;
-        assert!(poll_with(&colls(), &mut fake::opener(&s), &mut seq)[0].asleep);
-        assert_eq!(s.borrow().reads, 0);
+        let s = script();
+        s.s().refuse_open = true;
+        assert!(poll_with(&colls(), &mut s.clone(), &mut seq)[0].asleep);
+        let s = script();
+        s.s().refuse_send = true;
+        assert!(poll_with(&colls(), &mut s.clone(), &mut seq)[0].asleep);
+        assert_eq!(reads(&s), 0);
     }
 
     #[test]
     fn strict_matching() {
-        let s = fake::script();
+        let s = script();
         let other = [
             at(coll(VID, 0x5088, 0xFF1C, 0x0092, 65), "vendor"),
             at(coll(VID, 0x226F, 0xFF00, 0x0000, 65), "other-vendor"),
         ];
-        assert!(poll_with(&other, &mut fake::opener(&s), &mut 0).is_empty());
-        assert!(s.borrow().opened.is_empty());
+        assert!(poll_with(&other, &mut s.clone(), &mut 0).is_empty());
+        assert!(s.s().opened.is_empty());
     }
 }

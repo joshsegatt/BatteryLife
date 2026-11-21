@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x3837;
 pub const PID: u16 = 0x6011;
@@ -63,7 +63,7 @@ pub fn parse_battery(r: &[u8]) -> Option<Reply> {
     (pct <= 100).then_some(Reply::Level(pct, body[1] & 0x80 != 0))
 }
 
-fn query(io: &mut dyn Io) -> Option<Reply> {
+fn query(io: &mut dyn Dev) -> Option<Reply> {
     io.flush();
     // Start, version, flags 0, length 1, type 00 01, sub-command, checksum 0.
     if !io.write(&[
@@ -79,23 +79,23 @@ fn query(io: &mut dyn Io) -> Option<Reply> {
     ]) {
         return None;
     }
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     loop {
         let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
         if left == 0 {
             return None;
         }
-        if let Some(reply) = parse_battery(&io.read(left)?) {
+        if let Some(reply) = parse_battery(&io.read(Duration::from_millis(left))?) {
             return Some(reply);
         }
     }
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     for c in find(colls, VID, PID, |c| {
         c.page == 0xFF07 && c.usage == 0x0222 && c.out_len >= 64 && c.in_len >= 64
     }) {
-        let Some(reply) = open(c).and_then(|mut io| query(io.as_mut())) else {
+        let Some(reply) = hid.open(c).and_then(|mut io| query(io.as_mut())) else {
             continue;
         };
         let name = if c.product.is_empty() {
@@ -119,14 +119,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     /// [55][AA 01 flags len 00 type sub][body..][check]
     fn frame(flags: u8, kind: u8, sub: u8, body: &[u8]) -> Vec<u8> {
@@ -171,11 +170,10 @@ mod tests {
         f.queue(vec![frame(0, 0x01, READ_BATTERY, &[1, 63])]);
         let mut c = Coll::new(VID, PID, 0xFF07, 0x0222, 64, 64);
         c.product = "MCHOSE V9 Pro 2 Receiver".into();
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].key, "mchose:v9pro2");
         assert_eq!(out[0].name, "MCHOSE V9 Pro 2 Receiver");
         assert_eq!(out[0].percent, Some(63));
-        assert_eq!(f.s().writes[0], vec![0x55, 0xAA, 1, 0, 1, 0, 1, 0x0B, 0]);
+        assert_eq!(f.s().writes()[0], vec![0x55, 0xAA, 1, 0, 1, 0, 1, 0x0B, 0]);
     }
 }

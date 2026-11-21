@@ -18,9 +18,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{
-    BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, read_until,
-};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, read_until};
 use crate::registry::Match;
 
 const VID: u16 = 0x0DB0;
@@ -84,7 +82,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 /// (percent, charging) from a 0F 20 status frame.
@@ -112,18 +110,20 @@ fn query(d: &mut dyn Dev, end: Instant) -> Option<(u8, bool)> {
         return None;
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
-    let r = read_until(d, end, |r| r.len() >= 15 && r[0] == 0x0F && r[1] == 0x20)?;
+    let r = read_until(d, left(end), |r| {
+        r.len() >= 15 && r[0] == 0x0F && r[1] == 0x20
+    })?;
     parse_status(&r)
 }
 
 /// The GM41 only reports while the mouse moves; a sleeping mouse yields nothing.
 fn listen(d: &mut dyn Dev, end: Instant) -> Option<(u8, bool)> {
     let end = end.min(Instant::now() + Duration::from_millis(2000));
-    let r = read_until(d, end, |r| parse_gm41(r).is_some())?;
+    let r = read_until(d, left(end), |r| parse_gm41(r).is_some())?;
     parse_gm41(&r).map(|p| (p, false))
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     for m in &MODELS {
@@ -141,7 +141,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
         .next() else {
             continue;
         };
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             break;
         }
         let reading = io.open(c).and_then(|mut d| {
@@ -179,7 +179,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     #[test]
     fn gm31_frame_confirmed_against_msi_center() {
@@ -211,12 +211,15 @@ mod tests {
 
     #[test]
     fn zero_level_reads_as_asleep() {
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q, [0, 0x0F, 0x20]);
-            let mut r = vec![0u8; 64];
-            r[0] = 0x0F;
-            r[1] = 0x20;
-            s.push_input("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q, [0, 0x0F, 0x20]);
+                let mut r = vec![0u8; 64];
+                r[0] = 0x0F;
+                r[1] = 0x20;
+                s.push_input("", r);
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(&[coll(VID, 0x0D3C, 1, 0xFF00, 1, 65, 65, 0)], &mut f);
         assert!(out[0].asleep && out[0].percent.is_none());

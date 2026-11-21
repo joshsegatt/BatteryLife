@@ -8,14 +8,12 @@
 //! Ported from BatteryHub (src/drivers/niceboy.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, Coll, Opener, RECEIVER, RECEIVER_GRACE, colls, hid_opener, wait_for,
-};
+use crate::drivers::hid::{self, Coll, Hid, RECEIVER, RECEIVER_GRACE, read_until};
 
 pub const VID: u16 = 0x248A;
 const PID: u16 = 0xFA02;
@@ -35,7 +33,7 @@ fn is_battery_reply(r: &[u8]) -> bool {
     r.len() >= 7 && r[0] == 0x05 && r[2] == 0xFA && r[3] == 0x48
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     for c in colls.iter().filter(|c| {
         c.is(VID, PID)
             && c.iface == 0
@@ -44,12 +42,15 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
             && c.in_len == 33
             && c.out_len == 33
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         port.flush();
         if !port.write(&[0x05, 0x24, 0xFA, 0x48]) {
             continue;
         }
-        let Some(r) = wait_for(port.as_mut(), Duration::from_millis(500), is_battery_reply) else {
+        let Some(r) = read_until(port.as_mut(), Duration::from_millis(500), is_battery_reply)
+        else {
             continue;
         };
         let mut d = Device::new(
@@ -74,14 +75,17 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
 
+    use crate::drivers::hid::fake::{coll, per_write, reads, script};
+
+    /// A flush drops queued replies, as on the device.
+    /// Input and feature reports read.
     fn report(head: &[u8]) -> Vec<u8> {
         let mut r = head.to_vec();
         r.resize(33, 0);
@@ -109,17 +113,17 @@ mod tests {
     }
 
     fn level(reply: Vec<u8>) -> Device {
-        let s = fake::per_write(vec![vec![reply]]);
-        let out = poll_with(&[receiver()], &mut fake::opener(&s));
+        let s = per_write(vec![vec![reply]]);
+        let out = poll_with(&[receiver()], &mut s.clone());
         assert_eq!(out.len(), 1);
         out.into_iter().next().unwrap()
     }
 
     #[test]
     fn captured_replies() {
-        let s = fake::per_write(vec![vec![captured()]]);
-        let d = &poll_with(&[receiver()], &mut fake::opener(&s))[0];
-        assert_eq!(s.borrow().writes, vec![vec![0x05, 0x24, 0xFA, 0x48]]);
+        let s = per_write(vec![vec![captured()]]);
+        let d = &poll_with(&[receiver()], &mut s.clone())[0];
+        assert_eq!(s.s().writes(), vec![vec![0x05, 0x24, 0xFA, 0x48]]);
         assert_eq!(
             (d.percent, d.millivolts, d.charging),
             (Some(90), Some(4133), false)
@@ -195,15 +199,15 @@ mod tests {
         other_echo[2] = 0xFB;
         let mut other_report = captured();
         other_report[0] = 0x04;
-        let s = fake::per_write(vec![vec![
+        let s = per_write(vec![vec![
             other_type,
             other_echo,
             other_report,
             vec![0x05, 0x49, 0xFA, 0x48],
             captured(),
         ]]);
-        let out = poll_with(&[receiver()], &mut fake::opener(&s));
-        assert_eq!((out[0].percent, s.borrow().reads), (Some(90), 5));
+        let out = poll_with(&[receiver()], &mut s.clone());
+        assert_eq!((out[0].percent, reads(&s)), (Some(90), 5));
     }
 
     #[test]
@@ -219,17 +223,17 @@ mod tests {
                 5 => c.in_len = 32,
                 _ => c.out_len = 32,
             }
-            let s = fake::per_write(vec![vec![captured()]]);
-            assert!(poll_with(&[c], &mut fake::opener(&s)).is_empty());
-            assert!(s.borrow().opened.is_empty());
+            let s = per_write(vec![vec![captured()]]);
+            assert!(poll_with(&[c], &mut s.clone()).is_empty());
+            assert!(s.s().opened.is_empty());
         }
-        let s = fake::script();
-        s.borrow_mut().fail_open = true;
-        assert!(poll_with(&[receiver()], &mut fake::opener(&s)).is_empty());
-        assert!(s.borrow().writes.is_empty());
-        let s = fake::per_write(vec![vec![captured()]]);
-        s.borrow_mut().fail_write = true;
-        assert!(poll_with(&[receiver()], &mut fake::opener(&s)).is_empty());
-        assert_eq!(s.borrow().reads, 0);
+        let s = script();
+        s.s().refuse_open = true;
+        assert!(poll_with(&[receiver()], &mut s.clone()).is_empty());
+        assert!(s.s().writes().is_empty());
+        let s = per_write(vec![vec![captured()]]);
+        s.s().refuse_send = true;
+        assert!(poll_with(&[receiver()], &mut s.clone()).is_empty());
+        assert_eq!(reads(&s), 0);
     }
 }

@@ -21,7 +21,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind, interpolate};
-use crate::drivers::report_io::{self, Coll, Hid, MAX_WAIT, device, find, products};
+use crate::drivers::hid::{self, Coll, Hid, MAX_WAIT, find, products};
 
 pub const VID: u16 = 0x04A5;
 const CW_CABLE: u16 = 0x8005;
@@ -102,7 +102,7 @@ pub fn parse_dw(r: &[u8]) -> Option<u16> {
 
 fn poll_cw(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Option<Device>> {
     let cs = find(colls, VID, pid, |c| {
-        (c.page >= 0xFF00 || c.page == 0x00FF) && c.output == 65
+        (c.page >= 0xFF00 || c.page == 0x00FF) && c.out_len == 65
     });
     for c in cs {
         let Some(mut d) = hid.open(c) else { continue };
@@ -118,7 +118,7 @@ fn poll_cw(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Option<Device>
             return Some(None);
         };
         let cable = pid == CW_CABLE;
-        let mut s = device(
+        let mut s = Device::new(
             format!("zowie:{pid:04X}"),
             "ZOWIE EC-CW",
             Kind::Mouse,
@@ -140,8 +140,8 @@ fn poll_cw(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Option<Device>
 }
 
 fn poll_dw(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Device> {
-    let cmd = find(colls, VID, pid, |c| c.page == 0xFF03 && c.output == 16);
-    let rep = find(colls, VID, pid, |c| c.page == 0xFF04 && c.input == 16);
+    let cmd = find(colls, VID, pid, |c| c.page == 0xFF03 && c.out_len == 16);
+    let rep = find(colls, VID, pid, |c| c.page == 0xFF04 && c.in_len == 16);
     let (cmd, rep) = (cmd.first()?, rep.first()?);
     let mut input = hid.open(rep)?; // open the reply channel first
     let mut out = hid.open(cmd)?;
@@ -172,7 +172,7 @@ fn poll_dw(hid: &mut dyn Hid, colls: &[Coll], pid: u16) -> Option<Device> {
     } else {
         &cmd.product
     };
-    let mut s = device(
+    let mut s = Device::new(
         format!("zowie:{pid:04X}"),
         name,
         Kind::Mouse,
@@ -211,13 +211,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::Write(_) => Some(vec![]),
             Op::Read(_) => q.pop_front(),
             Op::Flush => Some(vec![]),
@@ -256,12 +256,12 @@ mod tests {
             vid: VID,
             pid: CW_RECEIVER,
             page: 0x00FF,
-            output: 65,
+            out_len: 65,
             ..Default::default()
         };
         let mut f = fake(vec![vec![0x2E, 0x0F, 64]]); // 3886 mV, 64%
         let out = poll_with(&mut f, std::slice::from_ref(&c));
-        let w: Vec<Op> = f.log.borrow().iter().map(|(_, o)| o.clone()).collect();
+        let w: Vec<Op> = f.s().log.iter().map(|(_, o)| o.clone()).collect();
         assert!(w.contains(&Op::Write(vec![0x00, 0xA5, 0x03])));
         let s = &out[0];
         assert_eq!(
@@ -289,7 +289,7 @@ mod tests {
                 vid: VID,
                 pid: DW_RECEIVER,
                 page: 0xFF03,
-                output: 16,
+                out_len: 16,
                 product: "ZOWIE Wireless Receiver".into(),
                 ..Default::default()
             },
@@ -297,7 +297,7 @@ mod tests {
                 vid: VID,
                 pid: DW_RECEIVER,
                 page: 0xFF04,
-                input: 16,
+                in_len: 16,
                 ..Default::default()
             },
         ];
@@ -321,10 +321,10 @@ mod tests {
             vid: VID,
             pid: 0x1234,
             page: 0xFF03,
-            output: 8,
+            out_len: 8,
             ..Default::default()
         };
         assert!(poll_with(&mut f, &[other]).is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
     }
 }

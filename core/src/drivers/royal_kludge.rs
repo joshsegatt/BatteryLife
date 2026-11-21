@@ -14,9 +14,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x2E3C;
 pub const PIDS: &[u16] = &[0x00A5, 0x00A6, 0x00E5, 0x00E6];
@@ -57,11 +55,11 @@ pub fn parse(r: &[u8]) -> Option<Battery> {
 }
 
 /// Up to three tries; Some(battery) when the receiver answered at all.
-fn query(port: &mut dyn Port) -> Option<Battery> {
+fn query(port: &mut dyn Dev) -> Option<Battery> {
     let mut answered = None;
     for attempt in 0..3 {
         if attempt > 0 {
-            port.pause(Duration::from_millis(100));
+            port.sleep(Duration::from_millis(100));
         }
         port.flush();
         if !port.write(&REQUEST) {
@@ -90,14 +88,16 @@ fn query(port: &mut dyn Port) -> Option<Battery> {
     answered.map(|_| Battery::Asleep)
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
     for &pid in PIDS {
         let page = if is_cable(pid) { 0xFFF2 } else { 0xFF00 };
         for c in colls.iter().filter(|c| {
             c.is(VID, pid) && c.page == page && c.usage == 1 && c.out_len == 65 && c.in_len == 65
         }) {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             let Some(b) = query(port.as_mut()) else {
                 continue;
             };
@@ -127,14 +127,15 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{coll, per_write, script};
 
+    /// A flush drops queued replies, as on the device.
     fn reply(answered: bool, mv: u16, pct: u16, usb: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
         r[..3].copy_from_slice(&[0x01, 0x01, 0x02]);
@@ -160,9 +161,9 @@ mod tests {
 
     #[test]
     fn dongle_and_cable() {
-        let s = fake::per_write(vec![vec![reply(true, 3950, 64, 0)]]);
-        let out = poll_with(&[coll(VID, 0x00A6, 0xFF00, 1, 65)], &mut fake::opener(&s));
-        assert_eq!(s.borrow().writes, vec![REQUEST.to_vec()]);
+        let s = per_write(vec![vec![reply(true, 3950, 64, 0)]]);
+        let out = poll_with(&[coll(VID, 0x00A6, 0xFF00, 1, 65)], &mut s.clone());
+        assert_eq!(s.s().writes(), vec![REQUEST.to_vec()]);
         let d = &out[0];
         assert_eq!(
             (d.percent, d.millivolts, d.charging),
@@ -170,19 +171,19 @@ mod tests {
         );
         assert_eq!((d.key.as_str(), d.via.as_str()), ("rk:2E3C:00A6", RECEIVER));
 
-        let s = fake::per_write(vec![vec![reply(true, 4100, 90, 0)]]);
-        let d = &poll_with(&[coll(VID, 0x00A5, 0xFFF2, 1, 65)], &mut fake::opener(&s))[0];
+        let s = per_write(vec![vec![reply(true, 4100, 90, 0)]]);
+        let d = &poll_with(&[coll(VID, 0x00A5, 0xFFF2, 1, 65)], &mut s.clone())[0];
         assert!(d.charging && d.via == CABLE);
     }
 
     #[test]
     fn mouse_not_answering_is_asleep_after_three_tries() {
         let none = reply(false, 0, 0, 0);
-        let s = fake::per_write(vec![vec![none.clone()], vec![none.clone()], vec![none]]);
-        let out = poll_with(&[coll(VID, 0x00E6, 0xFF00, 1, 65)], &mut fake::opener(&s));
+        let s = per_write(vec![vec![none.clone()], vec![none.clone()], vec![none]]);
+        let out = poll_with(&[coll(VID, 0x00E6, 0xFF00, 1, 65)], &mut s.clone());
         assert!(out[0].asleep && out[0].percent.is_none());
-        assert_eq!(s.borrow().writes.len(), 3);
-        let s = fake::script();
-        assert!(poll_with(&[coll(VID, 0x00E6, 0xFF00, 1, 65)], &mut fake::opener(&s)).is_empty());
+        assert_eq!(s.s().writes().len(), 3);
+        let s = script();
+        assert!(poll_with(&[coll(VID, 0x00E6, 0xFF00, 1, 65)], &mut s.clone()).is_empty());
     }
 }

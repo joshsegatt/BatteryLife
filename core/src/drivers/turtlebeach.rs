@@ -17,14 +17,14 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x10F5;
 /// (pid, cable); the transmitters first: the same headset is listed once.
 const MODELS: &[(u16, bool)] = &[(0x2251, false), (0x2262, false), (0x2253, true)];
 pub const PIDS: &[u16] = &[0x2251, 0x2262, 0x2253];
 
-fn send(io: &mut dyn Io, race: &[u8]) -> bool {
+fn send(io: &mut dyn Dev, race: &[u8]) -> bool {
     let mut buf = [0u8; 62];
     buf[0] = 0x06;
     buf[1] = race.len() as u8;
@@ -32,9 +32,9 @@ fn send(io: &mut dyn Io, race: &[u8]) -> bool {
     io.write(&buf)
 }
 
-fn drain(io: &mut dyn Io, n: usize) {
+fn drain(io: &mut dyn Dev, n: usize) {
     for _ in 0..n {
-        io.get_input_report(0x07);
+        io.get_input(0x07);
     }
 }
 
@@ -64,12 +64,12 @@ pub fn find_level(s: &[u8]) -> Option<u8> {
     level
 }
 
-pub fn read_level(io: &mut dyn Io) -> Option<u8> {
+pub fn read_level(io: &mut dyn Dev) -> Option<u8> {
     drain(io, 5);
     if !send(io, &[0x05, 0x5A, 0x02, 0x00, 0x42, 0x99]) {
         return None; // enable the CoAP client
     }
-    io.sleep(300); // the chip needs a moment after the client is enabled
+    io.sleep(Duration::from_millis(300)); // the chip needs a moment after the client is enabled
     drain(io, 5);
     let gsi = [
         0x05, 0x5A, 0x0A, 0x00, 0x02, 0x99, 0x40, 0x01, 0x00, 0x01, 0xB3, b'G', b'S', b'I',
@@ -79,11 +79,8 @@ pub fn read_level(io: &mut dyn Io) -> Option<u8> {
     }
     let mut payload = Vec::new();
     for _ in 0..30 {
-        io.sleep(30);
-        let Some(r) = io
-            .get_input_report(0x07)
-            .filter(|r| r.len() >= 3 && r[0] == 0x07)
-        else {
+        io.sleep(Duration::from_millis(30));
+        let Some(r) = io.get_input(0x07).filter(|r| r.len() >= 3 && r[0] == 0x07) else {
             continue;
         };
         let n = usize::from(r[1]).min(r.len() - 3);
@@ -106,7 +103,7 @@ pub fn model_name(product: &str) -> String {
     }
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut found: Option<(&Coll, bool)> = None;
     let mut level = None;
     for &(pid, cable) in MODELS {
@@ -115,7 +112,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
         });
         let Some(&c) = cs.first() else { continue };
         found.get_or_insert((c, cable));
-        level = open(c).and_then(|mut io| read_level(io.as_mut()));
+        level = hid.open(c).and_then(|mut io| read_level(io.as_mut()));
         if level.is_some() {
             found = Some((c, cable));
             break;
@@ -146,14 +143,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op, queued};
 
     #[test]
     fn gsi_level_parsing() {
@@ -180,24 +176,25 @@ mod tests {
             r.resize(62, 0xEE); // leftovers past the valid length are ignored
             r
         };
-        let f = Fake::new();
         let parts = [report(&doc[..15]), report(&doc[15..])];
         let calls = std::cell::Cell::new(0usize);
-        f.s().on_input = Some(Box::new(move |_, _| {
+        let f = Fake::with(move |s, c, op| {
+            let Op::GetInput(_) = op else {
+                return queued(s, c, op);
+            };
             calls.set(calls.get() + 1);
             // Ten drains first, then the two parts.
             parts.get(calls.get().wrapping_sub(11)).cloned()
-        }));
+        });
         let mut c = Coll::new(VID, 0x2251, 0xFF13, 1, 62, 62);
         c.product = "Stealth 700X Gen 3".into();
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].percent, Some(72));
         assert_eq!(out[0].name, "Turtle Beach Stealth 700X Gen 3");
         assert_eq!(out[0].key, "turtlebeach:stealth700");
-        assert_eq!(f.s().writes.len(), 2);
+        assert_eq!(f.s().writes().len(), 2);
         assert_eq!(
-            f.s().writes[0][..9],
+            f.s().writes()[0][..9],
             [0x06, 6, 0, 0x05, 0x5A, 0x02, 0x00, 0x42, 0x99]
         );
     }
@@ -205,9 +202,8 @@ mod tests {
     #[test]
     fn no_record_keeps_the_last_value() {
         let f = Fake::new();
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, 0x2253, 0xFF13, 1, 62, 62);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!((out[0].percent, out[0].asleep), (None, true));
         assert_eq!(out[0].via, "USB cable");
         assert_eq!(model_name(""), "Turtle Beach Stealth 700 Gen 3");

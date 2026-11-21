@@ -11,7 +11,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{Coll, Dev, HidIo, Io, colls, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 use crate::registry::Match;
 
 const VID: u16 = 0x258A;
@@ -23,15 +23,15 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 /// SET_FEATURE [05][cmd][0 x6], 100 ms, GET_FEATURE 05; the reply must echo the command.
-fn query(d: &mut dyn Dev, io: &mut dyn Io, cmd: u8) -> Option<Vec<u8>> {
+fn query(d: &mut dyn Dev, io: &mut dyn Hid, cmd: u8) -> Option<Vec<u8>> {
     if !d.set_feature(&[5, cmd, 0, 0, 0, 0, 0, 0]) {
         return None;
     }
-    io.sleep(100);
+    io.sleep(Duration::from_millis(100));
     d.get_feature(5)
         .filter(|r| r.len() == 8 && r[0] == 5 && r[1] == cmd)
 }
@@ -41,7 +41,7 @@ pub fn parse(link: &[u8], battery: &[u8]) -> Option<u8> {
     (link[2] == 1 && battery[2] == 0x11 && battery[3] <= 100).then_some(battery[3])
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     for c in find(colls, VID, PID, |c| {
         c.iface == 1
             && c.page == 0xFF00
@@ -77,7 +77,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     fn receiver() -> Coll {
         coll(VID, PID, 1, 0xFF00, 1, 0, 0, 8)
@@ -85,25 +85,30 @@ mod tests {
 
     /// Answers each command with [05][cmd][link or marker][level][0..], as in sinowealth_receiver_test.
     fn device(link: u8, level: u8, marker: u8, corrupt: bool) -> Fake {
-        Fake::with(move |s, _, kind, q| {
-            assert_eq!(kind, Sent::Feature);
-            assert!(q.len() == 8 && q[0] == 5 && (q[1] == 0x80 || q[1] == 0x90));
-            assert!(q[2..].iter().all(|b| *b == 0));
-            let mut r = vec![
-                5,
-                q[1],
-                if q[1] == 0x80 { link } else { marker },
-                level,
-                0,
-                0,
-                0,
-                0,
-            ];
-            if corrupt {
-                r[1] ^= 1;
+        let f = Fake::with(move |s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetFeature(_)));
+                assert!(q.len() == 8 && q[0] == 5 && (q[1] == 0x80 || q[1] == 0x90));
+                assert!(q[2..].iter().all(|b| *b == 0));
+                let mut r = vec![
+                    5,
+                    q[1],
+                    if q[1] == 0x80 { link } else { marker },
+                    level,
+                    0,
+                    0,
+                    0,
+                    0,
+                ];
+                if corrupt {
+                    r[1] ^= 1;
+                }
+                s.push_feature("", r);
             }
-            s.push_feature("", r);
-        })
+            fake::queued(s, fc, op)
+        });
+        f.s().pad_features = true;
+        f
     }
 
     #[test]
@@ -124,17 +129,13 @@ mod tests {
     fn rejects_link_down_and_bad_replies() {
         let mut f = device(0, 94, 0x11, false);
         assert!(poll_with(&[receiver()], &mut f).is_empty());
-        assert_eq!(
-            f.s().sent.len(),
-            1,
-            "no battery query when the link is down"
-        );
+        assert_eq!(f.s().sends(), 1, "no battery query when the link is down");
         assert!(poll_with(&[receiver()], &mut device(1, 94, 0x10, false)).is_empty());
         assert!(poll_with(&[receiver()], &mut device(1, 94, 0x11, true)).is_empty());
         let mut f = device(1, 94, 0x11, false);
         f.s().refuse_open = true;
         assert!(poll_with(&[receiver()], &mut f).is_empty());
-        assert!(f.s().sent.is_empty());
+        assert!(f.s().sends() == 0);
     }
 
     #[test]
@@ -153,7 +154,7 @@ mod tests {
             }
             let mut f = device(1, 94, 0x11, false);
             assert!(poll_with(&[c], &mut f).is_empty());
-            assert_eq!(f.s().opens, 0);
+            assert_eq!(f.s().opened.len(), 0);
         }
     }
 }

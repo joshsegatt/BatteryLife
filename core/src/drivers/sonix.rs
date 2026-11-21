@@ -12,14 +12,12 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits
 //! donglover69/sonix-keyboard-studio, deddroid/ak820-rs and usharik/ak820-studio.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener, sum, wait_for,
-};
+use crate::drivers::hid::{self, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE, read_until, sum};
 use crate::registry::Match;
 
 /// (vid, pid, interface; -1 = any).
@@ -89,12 +87,12 @@ pub fn request() -> Vec<u8> {
 }
 
 /// The level byte, or None when the dongle did not answer.
-fn query_level(port: &mut dyn Port) -> Option<u8> {
+fn query_level(port: &mut dyn Dev) -> Option<u8> {
     port.flush();
     if !port.write(&request()) {
         return None;
     }
-    wait_for(port, Duration::from_millis(500), |r| {
+    read_until(port, Duration::from_millis(500), |r| {
         r.len() >= 4 && r[..3] == [0x20, 0x01, 0x00]
     })
     .map(|r| r[3])
@@ -113,7 +111,7 @@ fn keyboard_name(product: &str) -> String {
 }
 
 /// Polls one dongle product; None when it is absent, silent, or reports no keyboard connected.
-pub fn poll_product(colls: &[Coll], open: &mut Opener, vid: u16, pid: u16) -> Option<Device> {
+pub fn poll_product(colls: &[Coll], hid: &mut dyn Hid, vid: u16, pid: u16) -> Option<Device> {
     let &(_, _, iface) = DONGLES.iter().find(|d| d.0 == vid && d.1 == pid)?;
     for c in colls.iter().filter(|c| {
         c.is(vid, pid)
@@ -123,7 +121,9 @@ pub fn poll_product(colls: &[Coll], open: &mut Opener, vid: u16, pid: u16) -> Op
             && c.out_len == 33
             && c.in_len == 33
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         // The first request can go unanswered while the 2.4 GHz link wakes up; retry once.
         let Some(level) = query_level(port.as_mut()).or_else(|| query_level(port.as_mut())) else {
             continue;
@@ -146,21 +146,21 @@ pub fn poll_product(colls: &[Coll], open: &mut Opener, vid: u16, pid: u16) -> Op
     None
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     DONGLES
         .iter()
-        .filter_map(|&(vid, pid, _)| poll_product(colls, open, vid, pid))
+        .filter_map(|&(vid, pid, _)| poll_product(colls, hid, vid, pid))
         .collect()
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, per_write};
 
     fn collection(vid: u16, pid: u16, iface: i32) -> Coll {
         let mut c = coll(vid, pid, 0xFF60, 0x61, 33);
@@ -169,9 +169,9 @@ mod tests {
         c
     }
 
-    fn run(c: Coll, replies: Vec<Vec<Vec<u8>>>) -> (Vec<Device>, fake::Shared) {
-        let s = fake::per_write(replies);
-        (poll_with(&[c], &mut fake::opener(&s)), s)
+    fn run(c: Coll, replies: Vec<Vec<Vec<u8>>>) -> (Vec<Device>, Fake) {
+        let s = per_write(replies);
+        (poll_with(&[c], &mut s.clone()), s)
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
             assert_eq!(out[0].key, format!("sonix:{vid:04X}:{pid:04X}"));
             assert_eq!(out[0].name, "Keyboard");
             assert_eq!(out[0].grace, RECEIVER_GRACE);
-            assert_eq!(s.borrow().writes, vec![request()]);
+            assert_eq!(s.s().writes(), vec![request()]);
         }
     }
 
@@ -230,7 +230,7 @@ mod tests {
                 _ => c = collection(0x36B0, 0x3002, 1), // the PMO / VIA shared id stays excluded
             }
             let (out, s) = run(c, vec![vec![vec![0x20, 1, 0, 73]]]);
-            assert!(out.is_empty() && s.borrow().opened.is_empty());
+            assert!(out.is_empty() && s.s().opened.is_empty());
         }
     }
 
@@ -246,14 +246,14 @@ mod tests {
                 vec![0x20, 1, 0, 73],
             ]],
         );
-        assert_eq!((out.len(), s.borrow().writes.len()), (1, 1));
+        assert_eq!((out.len(), s.s().writes().len()), (1, 1));
         let (out, s) = run(
             collection(0x342D, 0xE479, 1),
             vec![vec![], vec![vec![0x20, 1, 0, 73]]],
         );
-        assert_eq!((out.len(), s.borrow().writes.len()), (1, 2));
+        assert_eq!((out.len(), s.s().writes().len()), (1, 2));
         let (out, s) = run(collection(0x342D, 0xE479, 1), vec![]);
         assert!(out.is_empty());
-        assert_eq!(s.borrow().writes.len(), 2);
+        assert_eq!(s.s().writes().len(), 2);
     }
 }

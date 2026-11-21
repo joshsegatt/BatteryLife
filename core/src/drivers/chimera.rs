@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left};
 use crate::registry::Match;
 
 const VID: u16 = 0x3554;
@@ -24,7 +24,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 fn checksum(b: &[u8]) -> u8 {
@@ -55,8 +55,8 @@ fn query(d: &mut dyn Dev, cmd: u8, end: Instant) -> Option<Vec<u8>> {
     let end = end.min(Instant::now() + Duration::from_millis(500));
     d.flush();
     loop {
-        let left = ms_left(end);
-        if left == 0 || !d.write(&request(cmd)) {
+        let left = left(end);
+        if left.is_zero() || !d.write(&request(cmd)) {
             return None;
         }
         if let Some(r) = d.read(left)
@@ -67,7 +67,7 @@ fn query(d: &mut dyn Dev, cmd: u8, end: Instant) -> Option<Vec<u8>> {
     }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     for c in find(colls, VID, PID, |c| {
         c.page == 0xFF02 && c.usage == 2 && c.in_len >= 17 && c.out_len >= 17
@@ -101,7 +101,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(cmd: u8, status: u8, pct: u8, charging: u8) -> Vec<u8> {
         let mut r = vec![0u8; 17];
@@ -125,13 +125,16 @@ mod tests {
 
     #[test]
     fn reads_battery_after_online_check() {
-        let mut f = Fake::with(|s, _, _, q| {
-            let r = if q[1] == 3 {
-                reply(3, 1, 0, 0)
-            } else {
-                reply(4, 2, 66, 1)
-            };
-            s.push_input("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                let r = if q[1] == 3 {
+                    reply(3, 1, 0, 0)
+                } else {
+                    reply(4, 2, 66, 1)
+                };
+                s.push_input("", r);
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(&[coll(VID, PID, 1, 0xFF02, 2, 17, 17, 0)], &mut f);
         assert_eq!(out.len(), 1);
@@ -143,7 +146,12 @@ mod tests {
 
     #[test]
     fn offline_mouse_is_not_reported() {
-        let mut f = Fake::with(|s, _, _, q| s.push_input("", reply(q[1], 0, 50, 0)));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                s.push_input("", reply(q[1], 0, 50, 0));
+            }
+            fake::queued(s, fc, op)
+        });
         assert!(poll_with(&[coll(VID, PID, 1, 0xFF02, 2, 17, 17, 0)], &mut f).is_empty());
         assert!(parse_battery(&reply(4, 1, 50, 0)).is_none());
         assert!(parse_battery(&reply(4, 2, 0, 0)).is_none());

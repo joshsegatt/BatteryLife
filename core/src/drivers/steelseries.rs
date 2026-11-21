@@ -11,8 +11,8 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_util::map_to_100;
-use crate::drivers::report_io::{self, Coll, Dev, Hid, MAX_WAIT, device, find, products};
+use crate::drivers::hid::map_to_100;
+use crate::drivers::hid::{self, Coll, Dev, Hid, MAX_WAIT, find, products};
 
 pub const VID: u16 = 0x1038;
 /// Wireless devices drop off their receiver while asleep; keep the last level this long.
@@ -220,12 +220,12 @@ pub fn parse_aerox(m: &AeroxModel, r: &[u8]) -> Option<Status> {
 
 // ---- I/O --------------------------------------------------------------------------------------
 
-fn write_read(hid: &dyn Hid, d: &mut dyn Dev, req: &[u8], timeout: Duration) -> Option<Vec<u8>> {
+fn write_read(d: &mut dyn Dev, req: &[u8], timeout: Duration) -> Option<Vec<u8>> {
     d.flush();
     if !d.write(req) {
         return None;
     }
-    report_io::read_until(hid, d, timeout, |_| true)
+    hid::read_until(d, timeout, |_| true)
 }
 
 /// Sends `cmd` and returns the first input report that echoes it. SteelSeries GG keeps its own
@@ -315,20 +315,20 @@ fn page_ffc0(c: &Coll) -> bool {
     c.page == 0xFFC0 && c.usage == 0x0001
 }
 fn iface0(c: &Coll) -> bool {
-    c.iface == 0 && c.output > 0
+    c.iface == 0 && c.out_len > 0
 }
 fn iface2(c: &Coll) -> bool {
-    c.iface == 2 && c.output > 0
+    c.iface == 2 && c.out_len > 0
 }
 fn iface3(c: &Coll) -> bool {
-    c.iface == 3 && c.output > 0
+    c.iface == 3 && c.out_len > 0
 }
 fn iface4(c: &Coll) -> bool {
-    c.iface == 4 && c.output > 0
+    c.iface == 4 && c.out_len > 0
 }
 
 fn headset(pid: u16, s: Status) -> (Device, bool) {
-    let mut d = device(
+    let mut d = Device::new(
         format!("steelseries:{pid:04X}"),
         headset_name(pid),
         Kind::Headset,
@@ -341,7 +341,7 @@ fn headset(pid: u16, s: Status) -> (Device, bool) {
 }
 
 fn mouse(pid: u16, name: &str, wired: bool) -> Device {
-    device(
+    Device::new(
         format!("steelseries:{pid:04X}"),
         name,
         Kind::Mouse,
@@ -355,45 +355,45 @@ fn mouse(pid: u16, name: &str, wired: bool) -> Device {
 
 /// Arctis Pro Wireless: the command goes behind a 0 report id on Windows (interface 0 does not
 /// number its reports); the numbered form is tried in case a firmware numbers them.
-fn arctis_pro_cmd(hid: &dyn Hid, d: &mut dyn Dev, cmd: u8) -> Option<Vec<u8>> {
+fn arctis_pro_cmd(d: &mut dyn Dev, cmd: u8) -> Option<Vec<u8>> {
     let t = MAX_WAIT;
-    write_read(hid, d, &[0x00, cmd, 0xAA], t).or_else(|| write_read(hid, d, &[cmd, 0xAA], t))
+    write_read(d, &[0x00, cmd, 0xAA], t).or_else(|| write_read(d, &[cmd, 0xAA], t))
 }
 
 /// One device and whether it is connected, or None when the collection gave no valid reply.
 fn read(hid: &dyn Hid, d: &mut dyn Dev, model: Model, pid: u16) -> Option<(Device, bool)> {
     match model {
         Model::Arctis1 => {
-            let r = write_read(hid, d, &[0x06, 0x12], MAX_WAIT)?;
+            let r = write_read(d, &[0x06, 0x12], MAX_WAIT)?;
             Some(headset(pid, parse_arctis1(&r)?))
         }
         Model::Arctis7 => {
-            let r = write_read(hid, d, &[0x06, 0x18], MAX_WAIT)?;
+            let r = write_read(d, &[0x06, 0x18], MAX_WAIT)?;
             Some(headset(pid, parse_arctis7(&r)?))
         }
         Model::Arctis9 => {
-            let r = write_read(hid, d, &[0x00, 0x20], MAX_WAIT)?;
+            let r = write_read(d, &[0x00, 0x20], MAX_WAIT)?;
             Some(headset(pid, parse_arctis9(&r)?))
         }
         Model::ArctisProWireless => {
             // 41 AA -> [0] == 02 offline (04 online); 40 AA -> [0] level 0..4.
-            let r = arctis_pro_cmd(hid, d, 0x41)?;
+            let r = arctis_pro_cmd(d, 0x41)?;
             let connected = r[0] != 0x02;
             let mut s = Status {
                 connected,
                 ..Default::default()
             };
-            if connected && let Some(l) = arctis_pro_cmd(hid, d, 0x40).filter(|l| l[0] <= 4) {
+            if connected && let Some(l) = arctis_pro_cmd(d, 0x40).filter(|l| l[0] <= 4) {
                 s.percent = Some(map_to_100(l[0].into(), 0, 4));
             }
             Some(headset(pid, s))
         }
         Model::NovaProWireless => {
-            let r = write_read(hid, d, &[0x06, 0xB0], MAX_WAIT)?;
+            let r = write_read(d, &[0x06, 0xB0], MAX_WAIT)?;
             Some(headset(pid, parse_nova_pro(&r)?))
         }
         Model::NovaFamily => {
-            let r = write_read(hid, d, &[0x00, 0xB0], MAX_WAIT)?;
+            let r = write_read(d, &[0x00, 0xB0], MAX_WAIT)?;
             Some(headset(pid, parse_nova_family(pid, &r)?))
         }
         Model::Aerox => {
@@ -410,7 +410,7 @@ fn read(hid: &dyn Hid, d: &mut dyn Dev, model: Model, pid: u16) -> Option<(Devic
         }
         Model::Rival => {
             // Rival 3 Wireless (+ Gen 2), Rival 650: AA 01 -> [0] %, [2] charging.
-            let r = write_read(hid, d, &[0x00, 0xAA, 0x01], Duration::from_millis(300))
+            let r = write_read(d, &[0x00, 0xAA, 0x01], Duration::from_millis(300))
                 .filter(|r| r.len() >= 3)?;
             let rival650 = pid == 0x172B || pid == 0x1726;
             let name = if rival650 {
@@ -494,16 +494,15 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::{HashMap, VecDeque};
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn pid_table_matches_models() {
@@ -523,9 +522,9 @@ mod tests {
             iface: 4,
             page: 0xFFC0,
             usage: 1,
-            input: 64,
-            output: 64,
-            feature: 1024,
+            in_len: 64,
+            out_len: 64,
+            feat_len: 1024,
             path: "ffc0".into(),
             ..Default::default()
         }
@@ -542,7 +541,7 @@ mod tests {
 
     /// The base station: writes 06 B0 (rejected on the FF00 collection), each read returns `reply`.
     fn nova(reply: Vec<u8>, write_ok: bool) -> Fake {
-        Fake::new(move |c, op| match op {
+        Fake::with(move |_, c, op| match op.clone() {
             Op::Write(w) => {
                 assert_eq!(w, [0x06, 0xB0]);
                 (write_ok && c.page == 0xFFC0).then(Vec::new)
@@ -554,8 +553,9 @@ mod tests {
     }
 
     fn count(f: &Fake) -> (usize, usize, usize) {
+        let opened = f.s().opened.len();
         (
-            f.opens.get(),
+            opened,
             f.count(|o| matches!(o, Op::Write(_))),
             f.count(|o| matches!(o, Op::Read(_))),
         )
@@ -585,7 +585,7 @@ mod tests {
     fn nova_pro_skips_the_ff00_collection() {
         let mut other = nova_coll(0x225D);
         other.page = 0xFF00;
-        other.feature = 64;
+        other.feat_len = 64;
         other.path = "ff00".into();
         // FFC0 first: one open. FF00 first: its write is rejected, then FFC0 answers.
         let mut f = nova(nova_reply(), true);
@@ -628,7 +628,7 @@ mod tests {
         assert!(poll_with(&mut f, &[nova_coll(0x225D)]).is_empty());
         assert_eq!(count(&f), (1, 1, 0));
         let mut f = nova(nova_reply(), true);
-        f.open_ok.set(false);
+        f.s().refuse_open = true;
         assert!(poll_with(&mut f, &[nova_coll(0x225D)]).is_empty());
         assert_eq!(count(&f), (1, 0, 0));
         for invalid in 0..3 {
@@ -636,7 +636,7 @@ mod tests {
             match invalid {
                 0 => c.pid = 0x225E,
                 1 => c.iface = 3,
-                _ => c.output = 0,
+                _ => c.out_len = 0,
             }
             let mut f = nova(nova_reply(), true);
             assert!(poll_with(&mut f, &[c]).is_empty());
@@ -657,10 +657,10 @@ mod tests {
         by_pid: HashMap<u16, Vec<u8>>,
     }
 
-    fn mouse_fake(m: Rc<RefCell<Mouse>>) -> Fake {
-        Fake::new(move |c, op| {
-            let mut m = m.borrow_mut();
-            match op {
+    fn mouse_fake(m: Arc<Mutex<Mouse>>) -> Fake {
+        Fake::with(move |_, c, op| {
+            let mut m = m.lock().unwrap();
+            match op.clone() {
                 Op::Flush => {
                     m.queued.clear();
                     Some(vec![])
@@ -703,15 +703,15 @@ mod tests {
             iface: 3,
             page: 0xFFC0,
             usage: 1,
-            input: 65,
-            output: 65,
+            in_len: 65,
+            out_len: 65,
             path: format!("if3-{pid:04X}"),
             ..Default::default()
         }
     }
 
-    fn new_mouse() -> Rc<RefCell<Mouse>> {
-        Rc::new(RefCell::new(Mouse {
+    fn new_mouse() -> Arc<Mutex<Mouse>> {
+        Arc::new(Mutex::new(Mouse {
             queued: VecDeque::new(),
             expected: 0xD2,
             write_ok: true,
@@ -723,9 +723,9 @@ mod tests {
         }))
     }
 
-    fn poll_mouse(m: &Rc<RefCell<Mouse>>, pid: u16, cmd: u8, payload: &[u8]) -> Vec<Device> {
+    fn poll_mouse(m: &Arc<Mutex<Mouse>>, pid: u16, cmd: u8, payload: &[u8]) -> Vec<Device> {
         {
-            let mut s = m.borrow_mut();
+            let mut s = m.lock().unwrap();
             s.expected = cmd;
             s.writes = 0;
             s.reply = if payload.is_empty() {
@@ -744,7 +744,7 @@ mod tests {
         key: &'static str,
     }
 
-    fn expect(m: &Rc<RefCell<Mouse>>, model: &M, payload: &[u8], pct: Option<u8>, charging: bool) {
+    fn expect(m: &Arc<Mutex<Mouse>>, model: &M, payload: &[u8], pct: Option<u8>, charging: bool) {
         let cmd = if model.wired { 0x92 } else { 0xD2 };
         let out = poll_mouse(m, model.pid, cmd, payload);
         assert_eq!(out.len(), 1, "{:04X} {payload:02X?}", model.pid);
@@ -769,18 +769,18 @@ mod tests {
         );
     }
 
-    fn expect_nothing(m: &Rc<RefCell<Mouse>>, pid: u16, cmd: u8, payload: &[u8]) {
+    fn expect_nothing(m: &Arc<Mutex<Mouse>>, pid: u16, cmd: u8, payload: &[u8]) {
         assert!(poll_mouse(m, pid, cmd, payload).is_empty());
     }
 
     fn expect_one_mouse(
-        m: &Rc<RefCell<Mouse>>,
+        m: &Arc<Mutex<Mouse>>,
         receiver: &M,
         cable: &M,
         wireless: &[u8],
         wired: &[u8],
     ) {
-        m.borrow_mut().by_pid = HashMap::from([
+        m.lock().unwrap().by_pid = HashMap::from([
             (receiver.pid, wireless.to_vec()),
             (cable.pid, wired.to_vec()),
         ]);
@@ -798,7 +798,7 @@ mod tests {
             (s.via.as_str(), s.percent, s.charging),
             ("USB cable", Some(95), true)
         );
-        m.borrow_mut().by_pid.clear();
+        m.lock().unwrap().by_pid.clear();
         // Unplugging the cable keeps the key and returns to the wireless level.
         expect(m, receiver, &wireless[1..], Some(45), false);
     }
@@ -956,10 +956,10 @@ mod tests {
     fn aerox_echo_filtering_resend_and_nack() {
         let m = new_mouse();
         // Reports that do not echo the command are skipped.
-        m.borrow_mut().noise = vec![0x11, 0x00];
+        m.lock().unwrap().noise = vec![0x11, 0x00];
         expect(&m, &STEP_MODELS[2], &[0x0A], Some(45), false);
         // GG talking over the query: the receiver answers the third write.
-        m.borrow_mut().noise = vec![0x61, 0x00, 0x31, 0x31, 0x2E, 0x34, 0x00, 0x00];
+        m.lock().unwrap().noise = vec![0x61, 0x00, 0x31, 0x31, 0x2E, 0x34, 0x00, 0x00];
         expect(
             &m,
             &STEP_MODELS[0],
@@ -967,25 +967,25 @@ mod tests {
             Some(45),
             false,
         );
-        m.borrow_mut().reply_on_write = 3;
+        m.lock().unwrap().reply_on_write = 3;
         expect(&m, &STEP_MODELS[2], &[0x0A], Some(45), false);
-        assert_eq!(m.borrow().writes, 3);
+        assert_eq!(m.lock().unwrap().writes, 3);
         expect(&m, &GEN2[0], &[0x00, 0x61, 0x00], Some(97), false);
         // No echo before the deadline: nothing reported, and the query was resent.
         expect_nothing(&m, 0x1878, 0xD2, &[]);
-        let w = m.borrow().writes;
+        let w = m.lock().unwrap().writes;
         assert!((5..=11).contains(&w), "{w}");
-        m.borrow_mut().reply_on_write = 1;
+        m.lock().unwrap().reply_on_write = 1;
         // Mouse switched off: the receiver answers 40 FF, which ends the wait at once.
-        m.borrow_mut().noise = vec![0x40, 0xFF, 0x31, 0x34, 0x2E, 0x31];
+        m.lock().unwrap().noise = vec![0x40, 0xFF, 0x31, 0x34, 0x2E, 0x31];
         expect_nothing(&m, 0x1878, 0xD2, &[]);
-        assert_eq!(m.borrow().writes, 1);
-        m.borrow_mut().noise.clear();
+        assert_eq!(m.lock().unwrap().writes, 1);
+        m.lock().unwrap().noise.clear();
         // I/O failures.
-        m.borrow_mut().write_ok = false;
+        m.lock().unwrap().write_ok = false;
         expect_nothing(&m, 0x1838, 0xD2, &[0x13]);
-        assert_eq!(m.borrow().writes, 0);
-        m.borrow_mut().write_ok = true;
+        assert_eq!(m.lock().unwrap().writes, 0);
+        m.lock().unwrap().write_ok = true;
         expect_nothing(&m, 0x1838, 0xD2, &[]); // receiver never answers
     }
 

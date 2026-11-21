@@ -14,7 +14,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x1E71;
 pub const RECEIVER: u16 = 0x2101;
@@ -43,7 +43,7 @@ pub fn parse(r: &[u8]) -> Option<Result<Telemetry, ()>> {
     }))
 }
 
-fn read_telemetry(io: &mut dyn Io) -> Option<Telemetry> {
+fn read_telemetry(io: &mut dyn Dev) -> Option<Telemetry> {
     io.flush();
     let mut req = [0u8; 65]; // report id 0, then the 64-byte packet
     req[1..6].copy_from_slice(&[0x4E, 0x02, 0x81, 0x00, 0xB0]);
@@ -51,7 +51,7 @@ fn read_telemetry(io: &mut dyn Io) -> Option<Telemetry> {
         return None;
     }
     for _ in 0..10 {
-        let r = io.read(150)?;
+        let r = io.read(Duration::from_millis(150))?;
         if let Some(t) = parse(&r) {
             return t.ok();
         }
@@ -59,7 +59,7 @@ fn read_telemetry(io: &mut dyn Io) -> Option<Telemetry> {
     None
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     // One entry for the mouse on both ids; the cable reading wins (it is the one charging).
     let mut any = false;
     let mut reading = None;
@@ -70,7 +70,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
             if reading.is_some() {
                 break;
             }
-            reading = open(c).and_then(|mut io| read_telemetry(io.as_mut()));
+            reading = hid.open(c).and_then(|mut io| read_telemetry(io.as_mut()));
         }
     }
     if !any {
@@ -96,14 +96,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn telemetry(level: u16, mv: u16, cable: bool) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -136,22 +135,20 @@ mod tests {
         ack[..2].copy_from_slice(&[0x4E, 0xE5]);
         let f = Fake::new();
         f.queue(vec![ack, telemetry(55, 3800, false)]);
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, RECEIVER, 0xFFCA, 1, 65, 65);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].key, "nzxt:2101");
         assert_eq!(out[0].kind, Kind::Mouse);
         assert_eq!((out[0].percent, out[0].millivolts), (Some(55), Some(3800)));
-        let w = f.s().writes[0].clone();
+        let w = f.s().writes()[0].clone();
         assert_eq!((w.len(), &w[..6]), (65, &[0, 0x4E, 2, 0x81, 0, 0xB0][..]));
     }
 
     #[test]
     fn silent_dongle_keeps_the_last_value() {
         let f = Fake::new();
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, RECEIVER, 0xFFCA, 1, 65, 65);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!((out[0].percent, out[0].asleep), (None, true));
     }
 }

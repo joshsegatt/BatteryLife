@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x0ECB;
 const BATTERY_FEATURE: u16 = 0x000D;
@@ -83,34 +83,43 @@ pub fn hidv3_reply(r: &[u8]) -> Option<Option<u8>> {
 }
 
 /// With the headset switched off the dongle does not answer at all, so a timeout means "not there".
-fn get_battery(io: &mut dyn Io) -> Option<u8> {
+fn get_battery(io: &mut dyn Dev) -> Option<u8> {
     io.flush();
     if !io.set_feature(&BATTERY_REQUEST) {
         return None;
     }
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     loop {
         let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
         if left == 0 {
             return None;
         }
-        let r = io.read(left).filter(|r| r.len() >= 16)?;
+        let r = io
+            .read(Duration::from_millis(left))
+            .filter(|r| r.len() >= 16)?;
         if let Some(info) = hidv3_reply(&r) {
             return info;
         }
     }
 }
 
-fn poll_hidv1(colls: &[Coll], open: &mut Open<'_>, out: &mut Vec<Device>) {
+/// Value byte of the numbered 2-byte feature report `id`.
+fn feature_byte(io: &mut dyn Dev, id: u8) -> Option<u8> {
+    io.get_feature_len(id, 2)
+        .filter(|r| r.len() == 2 && r[0] == id)
+        .map(|r| r[1])
+}
+
+fn poll_hidv1(colls: &[Coll], hid: &mut dyn Hid, out: &mut Vec<Device>) {
     for &(pid, iface, page, name) in HIDV1_MODELS {
         for c in find(colls, VID, pid, |c| {
             c.iface == iface && c.feat_len >= 2 && (page == 0 || (c.page == page && c.usage == 0))
         }) {
-            let Some(mut io) = open(c) else { continue };
-            if io.get_feature_byte(0x68) != Some(1) {
+            let Some(mut io) = hid.open(c) else { continue };
+            if feature_byte(io.as_mut(), 0x68) != Some(1) {
                 continue;
             }
-            let Some(pct) = io.get_feature_byte(0x49).filter(|p| *p <= 100) else {
+            let Some(pct) = feature_byte(io.as_mut(), 0x49).filter(|p| *p <= 100) else {
                 continue;
             };
             let mut d = Device::new(
@@ -126,14 +135,14 @@ fn poll_hidv1(colls: &[Coll], open: &mut Open<'_>, out: &mut Vec<Device>) {
     }
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
-    poll_hidv1(colls, open, &mut out);
+    poll_hidv1(colls, hid, &mut out);
     for &(pid, name, dongle) in MODELS {
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFF12 && c.feat_len >= 11 && c.in_len >= 16
         }) {
-            let Some(mut io) = open(c) else { continue };
+            let Some(mut io) = hid.open(c) else { continue };
             let Some(info) = get_battery(io.as_mut()) else {
                 continue;
             };
@@ -153,14 +162,21 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op, queued};
+
+    /// Answers feature report `id` with [id][value].
+    fn feature_bytes(bytes: Vec<(u8, u8)>) -> Fake {
+        Fake::with(move |s, c, op| match op {
+            Op::GetFeature(id, _) => bytes.iter().find(|(i, _)| i == id).map(|p| vec![p.0, p.1]),
+            _ => queued(s, c, op),
+        })
+    }
 
     fn reply(info: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -193,12 +209,11 @@ mod tests {
             vec![0x86, 0x00, 0xDD, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             reply(0x80 | 64),
         ]);
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].key, "jbl:2125");
         assert_eq!(out[0].via, "2.4 GHz receiver");
         assert_eq!((out[0].percent, out[0].charging), (Some(64), true));
-        assert_eq!(f.s().set_features, vec![BATTERY_REQUEST.to_vec()]);
+        assert_eq!(f.s().features(), vec![BATTERY_REQUEST.to_vec()]);
     }
 
     #[test]
@@ -206,14 +221,12 @@ mod tests {
         let mut c = Coll::new(VID, 0x206B, 0x0001, 0, 0, 0);
         c.iface = 3;
         c.feat_len = 64;
-        let f = Fake::new();
-        f.s().feature_bytes = vec![(0x68, 1), (0x49, 47)];
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(std::slice::from_ref(&c), &mut *f.opener(&opened));
+        let f = feature_bytes(vec![(0x68, 1), (0x49, 47)]);
+        let out = poll_colls(std::slice::from_ref(&c), &mut f.clone());
         assert_eq!(out[0].name, "JBL Quantum 350 Wireless");
         assert_eq!(out[0].percent, Some(47));
         // Headset not linked: nothing listed.
-        f.s().feature_bytes = vec![(0x68, 0), (0x49, 47)];
-        assert!(poll_colls(&[c], &mut *f.opener(&opened)).is_empty());
+        let f = feature_bytes(vec![(0x68, 0), (0x49, 47)]);
+        assert!(poll_colls(&[c], &mut f.clone()).is_empty());
     }
 }

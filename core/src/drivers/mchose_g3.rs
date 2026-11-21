@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, ms_left, read_until};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, left, read_until};
 use crate::registry::Match;
 
 const VID: u16 = 0x3837;
@@ -25,7 +25,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub const REQUEST: [u8; 11] = [
@@ -44,18 +44,20 @@ fn query(d: &mut dyn Dev, end: Instant) -> Option<(u8, bool)> {
         return None;
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
-    let r = read_until(d, end, |r| r.len() >= 10 && r[0] == 0xAA && r[1] == 0x30)?;
+    let r = read_until(d, left(end), |r| {
+        r.len() >= 10 && r[0] == 0xAA && r[1] == 0x30
+    })?;
     parse(&r)
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     // Prefer wired over 2.4 GHz when both are connected at the same time.
     for pid in [WIRED, WIRELESS] {
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFF01 && c.usage == 0x0010 && c.out_len >= 65 && c.in_len >= 65
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return Vec::new();
             }
             let Some((pct, charging)) = io.open(c).and_then(|mut d| query(d.as_mut(), end)) else {
@@ -83,7 +85,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(pct: u8, charging: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
@@ -96,9 +98,12 @@ mod tests {
 
     #[test]
     fn reads_level_and_charging() {
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q, REQUEST);
-            s.push_input("", reply(58, 1));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q, REQUEST);
+                s.push_input("", reply(58, 1));
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(&[coll(VID, WIRELESS, 1, 0xFF01, 0x10, 65, 65, 0)], &mut f);
         assert_eq!(out.len(), 1);

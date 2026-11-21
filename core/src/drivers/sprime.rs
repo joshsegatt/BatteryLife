@@ -7,12 +7,12 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, from Sprime's web driver
 //! (sprime.pro).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x1915;
@@ -25,7 +25,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[derive(Debug, PartialEq)]
@@ -50,10 +50,10 @@ pub fn parse(r: &[u8], cable: bool) -> Option<Status> {
     })
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         let cable = CABLES.contains(&pid);
         if !cable && !RECEIVERS.contains(&pid) {
             continue;
@@ -61,7 +61,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFFA0 && c.usage == 1 && c.feat_len >= 32
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -72,12 +72,12 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
             let mut status = None;
             for attempt in 0..4 {
                 if attempt > 0 {
-                    io.sleep(90);
+                    io.sleep(Duration::from_millis(90));
                 }
                 if !d.set_feature(&req) {
                     break;
                 }
-                io.sleep(15);
+                io.sleep(Duration::from_millis(15));
                 if let Some(s) = d.get_feature(5).and_then(|r| parse(&r, cable)) {
                     let online = s.online;
                     status = Some(s);
@@ -112,7 +112,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(pct: u8, charging: u8, full: u8, online: u8) -> Vec<u8> {
         let mut r = vec![0u8; 32];
@@ -142,10 +142,14 @@ mod tests {
 
     #[test]
     fn polls_the_receiver() {
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q[..5], [5, 0x15, 0, 0, 1]);
-            s.push_feature("", reply(80, 0, 0, 1));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q[..5], [5, 0x15, 0, 0, 1]);
+                s.push_feature("", reply(80, 0, 0, 1));
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let out = poll_with(&[coll(VID, 0xAC1C, 0, 0xFFA0, 1, 0, 0, 32)], &mut f);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].percent, Some(80));

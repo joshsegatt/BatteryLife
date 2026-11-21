@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x1915;
@@ -50,7 +50,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 /// Output report (leading 0 report id) carrying one event, optionally for an ESB channel.
@@ -220,8 +220,8 @@ impl Link {
 fn pump(d: &mut dyn Dev, link: &mut Link, ms: u64, deadline: Instant) {
     let end = deadline.min(Instant::now() + Duration::from_millis(ms));
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return;
         }
         let Some(r) = d.read(left) else { return };
@@ -255,10 +255,10 @@ fn query(
     None
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out: Vec<Device> = Vec::new();
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         let receiver = RECEIVERS.contains(&pid);
         if !receiver && !MICE.contains(&pid) {
             continue;
@@ -266,7 +266,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFF00 && c.usage == 1 && c.in_len == 65 && c.out_len == 65
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -323,7 +323,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
     use std::collections::{HashMap, VecDeque};
 
     // ---- rawm_protocol_test.cpp ----
@@ -481,35 +481,39 @@ mod tests {
     fn devices(units: Vec<(u16, Unit)>) -> Fake {
         let units: HashMap<u16, Unit> = units.into_iter().collect();
         let mut queued: HashMap<String, VecDeque<Vec<u8>>> = HashMap::new();
-        Fake::with(move |s, path, kind, data| {
-            assert_eq!(kind, Sent::Write);
-            let pid = u16::from_str_radix(&path[5..9], 16).unwrap();
-            let u = &units[&pid];
-            assert!(data.len() >= 3 && data[0] == 0);
-            let mut i = 1;
-            let mut channel = None;
-            if data[i] & 0xC0 == 0xC0 {
-                channel = Some(data[i] & 0x3F);
-                i += 1;
-            }
-            assert!(channel.is_none() || channel == Some(0));
-            assert_eq!(data[i] & 0xC0, 0x80);
-            let e = &data[i + 1..];
-            assert_eq!(e.len(), usize::from(data[i] & 0x3F));
-            let is_query = e.len() == 13 && e[..3] == [0x01, 13, 0x03];
-            assert!(is_query || e == [0x0E, 0x04, 0x00, 0x00]);
-            let q = queued.entry(path.to_string()).or_default();
-            if is_query && channel.is_none() && u.answers {
-                q.extend(reports(&event(2, &text(&u.own_info)), 63, None, 0));
-            }
-            if is_query && channel == Some(0) && u.receiver && u.mouse_awake {
-                q.extend(reports(&event(2, &text(&u.mouse_info)), 30, Some(0), 0));
-            }
-            for _ in 0..4 {
-                if let Some(r) = q.pop_front() {
-                    s.push_input(path, r);
+        Fake::with(move |s, fc, op| {
+            if let Some(data) = op.sent() {
+                let path = fc.path.as_str();
+                assert!(matches!(op, Op::Write(_)));
+                let pid = u16::from_str_radix(&path[5..9], 16).unwrap();
+                let u = &units[&pid];
+                assert!(data.len() >= 3 && data[0] == 0);
+                let mut i = 1;
+                let mut channel = None;
+                if data[i] & 0xC0 == 0xC0 {
+                    channel = Some(data[i] & 0x3F);
+                    i += 1;
+                }
+                assert!(channel.is_none() || channel == Some(0));
+                assert_eq!(data[i] & 0xC0, 0x80);
+                let e = &data[i + 1..];
+                assert_eq!(e.len(), usize::from(data[i] & 0x3F));
+                let is_query = e.len() == 13 && e[..3] == [0x01, 13, 0x03];
+                assert!(is_query || e == [0x0E, 0x04, 0x00, 0x00]);
+                let q = queued.entry(path.to_string()).or_default();
+                if is_query && channel.is_none() && u.answers {
+                    q.extend(reports(&event(2, &text(&u.own_info)), 63, None, 0));
+                }
+                if is_query && channel == Some(0) && u.receiver && u.mouse_awake {
+                    q.extend(reports(&event(2, &text(&u.mouse_info)), 30, Some(0), 0));
+                }
+                for _ in 0..4 {
+                    if let Some(r) = q.pop_front() {
+                        s.push_input(path, r);
+                    }
                 }
             }
+            fake::queued(s, fc, op)
         })
     }
 
@@ -542,7 +546,7 @@ mod tests {
         assert_eq!((s.via.as_str(), s.kind), ("2.4 GHz receiver", Kind::Mouse));
         assert_eq!((s.percent, s.charging), (Some(82), false));
         assert_eq!(s.grace, Duration::from_secs(1800));
-        assert_eq!(f.s().opens, 1);
+        assert_eq!(f.s().opened.len(), 1);
     }
 
     #[test]
@@ -644,6 +648,6 @@ mod tests {
             &mut f,
         );
         let st = f.s();
-        assert!(out.is_empty() && st.opens == 0 && st.sent.is_empty());
+        assert!(out.is_empty() && st.opened.is_empty() && st.sends() == 0);
     }
 }

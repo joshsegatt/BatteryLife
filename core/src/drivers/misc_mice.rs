@@ -39,9 +39,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{
-    BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products, read_until,
-};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids, read_until};
 use crate::registry::Match;
 
 const REPLY_MS: u64 = 500;
@@ -70,10 +68,10 @@ pub fn motospeed_parse(r: &[u8]) -> Option<(u8, bool)> {
 }
 
 pub fn poll_motospeed(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    motospeed_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| motospeed_with(colls, hid))
 }
 
-fn motospeed_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn motospeed_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     for pid in [0xFFE0, 0xFFF2, 0xFFF1] {
@@ -88,7 +86,7 @@ fn motospeed_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
                 out.push(s);
                 break;
             }
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -98,7 +96,7 @@ fn motospeed_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
             }
             let until = end.min(Instant::now() + Duration::from_millis(REPLY_MS));
             let Some((pct, charging)) =
-                read_until(d.as_mut(), until, |r| r.len() > 20 && r[0] == 0xB4)
+                read_until(d.as_mut(), left(until), |r| r.len() > 20 && r[0] == 0xB4)
                     .and_then(|r| motospeed_parse(&r))
             else {
                 continue;
@@ -187,11 +185,9 @@ static LISTENERS: Mutex<Option<Listeners>> = Mutex::new(None);
 
 pub fn poll_xenta(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut l = LISTENERS.lock().unwrap_or_else(|e| e.into_inner());
-    xenta_with(
-        &colls(infos),
-        &mut HidIo(api),
-        l.get_or_insert_with(HashMap::new),
-    )
+    hid::run(api, infos, |hid, colls| {
+        xenta_with(colls, hid, l.get_or_insert_with(HashMap::new))
+    })
 }
 
 /// Takes the frames queued since the last poll; a new listener waits for two.
@@ -200,10 +196,14 @@ fn xenta_listen(l: &mut Listener, pid: u16, fresh: bool, end: Instant) {
     let mut got = 0;
     loop {
         let waiting = fresh && got < 2;
-        if waiting && ms_left(until) == 0 {
+        if waiting && left(until).is_zero() {
             break;
         }
-        let wait = if waiting { ms_left(until).max(1) } else { 30 };
+        let wait = if waiting {
+            left(until).max(Duration::from_millis(1))
+        } else {
+            Duration::from_millis(30)
+        };
         let Some(r) = l.dev.read(wait).filter(|r| r.len() >= 5) else {
             break;
         };
@@ -303,7 +303,7 @@ fn xenta_device(l: &Listener, pid: u16) -> Option<Device> {
     Some(s)
 }
 
-fn xenta_with(colls: &[Coll], io: &mut dyn Io, listeners: &mut Listeners) -> Vec<Device> {
+fn xenta_with(colls: &[Coll], io: &mut dyn Hid, listeners: &mut Listeners) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut present = Vec::new();
     let mut out = Vec::new();
@@ -381,7 +381,7 @@ static DELUX_SEQ: Mutex<u8> = Mutex::new(0);
 
 pub fn poll_ajazz(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut seq = DELUX_SEQ.lock().unwrap_or_else(|e| e.into_inner());
-    ajazz_with(&colls(infos), &mut HidIo(api), &mut seq)
+    hid::run(api, infos, |hid, colls| ajazz_with(colls, hid, &mut seq))
 }
 
 #[derive(Debug, PartialEq)]
@@ -425,7 +425,7 @@ fn delux_valid(r: &[u8]) -> bool {
 /// Returns (device if connected, handled) for one Delux product.
 fn poll_delux(
     colls: &[Coll],
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     seq: &mut u8,
     pid: u16,
     end: Instant,
@@ -433,7 +433,7 @@ fn poll_delux(
     for c in find(colls, DELUX_VID, pid, |c| {
         c.page == 0xFF00 && c.usage == 1 && c.feat_len >= 33
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -445,7 +445,7 @@ fn poll_delux(
         if !d.set_feature(&req) {
             continue;
         }
-        io.sleep(20);
+        io.sleep(Duration::from_millis(20));
         let Some(mut r) = d.get_feature(0x0C).filter(|r| delux_valid(r)) else {
             continue;
         };
@@ -453,7 +453,7 @@ fn poll_delux(
             *seq = seq.wrapping_add(1);
             req[4] = *seq;
             if d.set_feature(&req) {
-                io.sleep(20);
+                io.sleep(Duration::from_millis(20));
                 if let Some(r2) = d.get_feature(0x0C).filter(|r| delux_valid(r)) {
                     r = r2;
                 }
@@ -509,7 +509,7 @@ pub fn aj179_name(r: &[u8]) -> String {
 
 fn poll_aj179(
     colls: &[Coll],
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     vid: u16,
     pid: u16,
     end: Instant,
@@ -517,7 +517,7 @@ fn poll_aj179(
     for c in find(colls, vid, pid, |c| {
         c.iface == 2 && c.out_len == 33 && c.in_len == 33
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -527,7 +527,8 @@ fn poll_aj179(
             continue;
         }
         let until = end.min(Instant::now() + Duration::from_millis(REPLY_MS));
-        let Some(r) = read_until(d.as_mut(), until, aj179_valid).filter(|r| r[13] <= 100) else {
+        let Some(r) = read_until(d.as_mut(), left(until), aj179_valid).filter(|r| r[13] <= 100)
+        else {
             continue;
         };
         let receiver = vid == AJAZZ_RECEIVER_VID;
@@ -560,14 +561,14 @@ pub fn aj_series_parse(r: &[u8]) -> Option<u8> {
 
 fn poll_aj_series(
     colls: &[Coll],
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     pid: u16,
     end: Instant,
 ) -> Option<Option<Device>> {
     for c in find(colls, AJ_SERIES_VID, pid, |c| {
         c.page == 0xFFFF && c.usage == 0x02 && c.feat_len >= 65
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -576,7 +577,7 @@ fn poll_aj_series(
         if !d.set_feature(&req) {
             continue;
         }
-        io.sleep(30);
+        io.sleep(Duration::from_millis(30));
         let Some(pct) = d.get_feature(0x05).and_then(|r| aj_series_parse(&r)) else {
             continue;
         };
@@ -599,11 +600,11 @@ fn aj139_reply(r: &[u8]) -> bool {
     r.len() > 9 && r[0] == 0xAA && r[1] == 0x30
 }
 
-fn poll_aj139(colls: &[Coll], io: &mut dyn Io, vid: u16, end: Instant) -> Option<Option<Device>> {
+fn poll_aj139(colls: &[Coll], io: &mut dyn Hid, vid: u16, end: Instant) -> Option<Option<Device>> {
     for c in find(colls, vid, AJ139_PID, |c| {
         c.page == 0xFF01 && c.usage == 0x0010 && c.out_len >= 65 && c.in_len >= 65
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -616,7 +617,7 @@ fn poll_aj139(colls: &[Coll], io: &mut dyn Io, vid: u16, end: Instant) -> Option
         ] {
             if r.is_none() && d.write(req) {
                 let until = end.min(Instant::now() + Duration::from_millis(REPLY_MS));
-                r = read_until(d.as_mut(), until, aj139_reply);
+                r = read_until(d.as_mut(), left(until), aj139_reply);
             }
         }
         let Some(r) = r.filter(|r| r[8] <= 100) else {
@@ -645,7 +646,7 @@ fn poll_aj139(colls: &[Coll], io: &mut dyn Io, vid: u16, end: Instant) -> Option
     None
 }
 
-fn ajazz_with(colls: &[Coll], io: &mut dyn Io, seq: &mut u8) -> Vec<Device> {
+fn ajazz_with(colls: &[Coll], io: &mut dyn Hid, seq: &mut u8) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     let mut handled: Vec<(u16, u16)> = Vec::new();
@@ -663,7 +664,7 @@ fn ajazz_with(colls: &[Coll], io: &mut dyn Io, seq: &mut u8) -> Vec<Device> {
         }
     }
     for vid in [AJAZZ_RECEIVER_VID, DELUX_VID] {
-        for pid in products(colls, vid) {
+        for pid in pids(colls, vid) {
             if !handled.contains(&(vid, pid))
                 && let Some(found) = poll_aj179(colls, io, vid, pid, end)
             {
@@ -672,7 +673,7 @@ fn ajazz_with(colls: &[Coll], io: &mut dyn Io, seq: &mut u8) -> Vec<Device> {
             }
         }
     }
-    for pid in products(colls, AJ_SERIES_VID) {
+    for pid in pids(colls, AJ_SERIES_VID) {
         out.extend(poll_aj_series(colls, io, pid, end).flatten());
     }
     for vid in [AJ139_DONGLE_VID, AJ139_CABLE_VID] {
@@ -697,7 +698,7 @@ static W1_MODELS: Mutex<[u8; 2]> = Mutex::new([0, 0]);
 
 pub fn poll_pixart(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut known = W1_MODELS.lock().unwrap_or_else(|e| e.into_inner());
-    pixart_with(&colls(infos), &mut HidIo(api), &mut known)
+    hid::run(api, infos, |hid, colls| pixart_with(colls, hid, &mut known))
 }
 
 /// Incott status reply: (percent, charging); stale replies (bytes 2 and 3 both 0) are skipped.
@@ -742,7 +743,7 @@ fn pixart_device(pid: u16, key: &str, name: &str, pct: u8, charging: bool) -> Op
 /// status input report 09 on every FF05 collection.
 fn w1_read(
     colls: &[Coll],
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     d: &mut dyn Dev,
     pid: u16,
     end: Instant,
@@ -759,12 +760,12 @@ fn w1_read(
     for i in ins.iter_mut() {
         i.flush();
     }
-    let read_button = |d: &mut dyn Dev, io: &mut dyn Io, button: u8| {
+    let read_button = |d: &mut dyn Dev, io: &mut dyn Hid, button: u8| {
         if !d.set_feature(&[0x09, 0x86, button]) {
             return false;
         }
         for t in 0..2 {
-            io.sleep(if t == 0 { 150 } else { 20 });
+            io.sleep(Duration::from_millis(if t == 0 { 150 } else { 20 }));
             match d.get_feature(0x09) {
                 None => return true,
                 Some(f) if f.len() >= 4 && f[1] == 0x86 => break,
@@ -775,9 +776,9 @@ fn w1_read(
     };
     let listen = |ins: &mut [Box<dyn Dev>], ms: u64| -> Option<Vec<u8>> {
         let until = end.min(Instant::now() + Duration::from_millis(ms));
-        while ms_left(until) > 0 {
+        while !left(until).is_zero() {
             for i in ins.iter_mut() {
-                if let Some(r) = i.read(50)
+                if let Some(r) = i.read(Duration::from_millis(50))
                     && r.len() >= 2
                     && r[0] == 0x09
                     && (r[1] & 0x7F) <= 100
@@ -788,7 +789,7 @@ fn w1_read(
         }
         None
     };
-    io.sleep(200); // the W1 Service waits 200 ms after 8F before its next request
+    io.sleep(Duration::from_millis(200)); // the W1 Service waits 200 ms after 8F before its next request
     let mut sent = false;
     for b in [0, 1, 2, 4, 3] {
         sent |= read_button(d, io, b);
@@ -798,7 +799,7 @@ fn w1_read(
     }
     let mut got = listen(&mut ins, 400);
     for _ in 0..4 {
-        if got.is_some() || ms_left(end) == 0 || !read_button(d, io, 0) {
+        if got.is_some() || left(end).is_zero() || !read_button(d, io, 0) {
             break;
         }
         got = listen(&mut ins, 550);
@@ -809,7 +810,7 @@ fn w1_read(
 /// Some(device or hidden) when the product is a W1, None to leave it to the Incott query.
 fn poll_w1(
     colls: &[Coll],
-    io: &mut dyn Io,
+    io: &mut dyn Hid,
     pid: u16,
     known: &mut u8,
     end: Instant,
@@ -825,7 +826,7 @@ fn poll_w1(
     let mut open: Option<Box<dyn Dev>> = None;
     let mut replied: Option<u8> = None;
     for c in cs {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             break;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -833,7 +834,7 @@ fn poll_w1(
             continue;
         }
         for _ in 0..10 {
-            io.sleep(50);
+            io.sleep(Duration::from_millis(50));
             let Some(r) = d.get_feature(0x09) else { break };
             replied = w1_model(&r);
             if replied.is_some() {
@@ -866,13 +867,13 @@ fn poll_w1(
     Some(reading.and_then(|(pct, charging)| pixart_device(pid, "wraithw1", name, pct, charging)))
 }
 
-fn poll_incott(colls: &[Coll], io: &mut dyn Io, pid: u16, end: Instant) -> Option<Device> {
+fn poll_incott(colls: &[Coll], io: &mut dyn Hid, pid: u16, end: Instant) -> Option<Device> {
     let mut cs = find(colls, PIXART_VID, pid, |c| {
         c.page == 0xFF05 && c.feat_len >= 9
     });
     cs.reverse();
     for c in cs {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return None;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -881,7 +882,7 @@ fn poll_incott(colls: &[Coll], io: &mut dyn Io, pid: u16, end: Instant) -> Optio
         }
         let mut reading = None;
         for _ in 0..10 {
-            io.sleep(50);
+            io.sleep(Duration::from_millis(50));
             let Some(r) = d.get_feature(0x09) else { break };
             if r.len() >= 4 && r[0] == 0x09 && r[1] == 0x89 && (r[2] | r[3]) != 0 {
                 reading = incott_parse(&r);
@@ -897,7 +898,7 @@ fn poll_incott(colls: &[Coll], io: &mut dyn Io, pid: u16, end: Instant) -> Optio
     None
 }
 
-fn pixart_with(colls: &[Coll], io: &mut dyn Io, known: &mut [u8; 2]) -> Vec<Device> {
+fn pixart_with(colls: &[Coll], io: &mut dyn Hid, known: &mut [u8; 2]) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     for (i, pid) in PIXART_PIDS.into_iter().enumerate() {
@@ -912,7 +913,7 @@ fn pixart_with(colls: &[Coll], io: &mut dyn Io, known: &mut [u8; 2]) -> Vec<Devi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     #[test]
     fn xenta_protocol() {
@@ -959,8 +960,8 @@ mod tests {
             out[0].asleep && out[0].percent.is_none(),
             "one frame is not enough"
         );
-        assert_eq!(f.s().opens, 1, "the handle stays open");
-        assert!(f.s().sent.is_empty(), "nothing is ever sent");
+        assert_eq!(f.s().opened.len(), 1, "the handle stays open");
+        assert!(f.s().sends() == 0, "nothing is ever sent");
     }
 
     #[test]
@@ -995,7 +996,7 @@ mod tests {
         fn set_output(&mut self, _: &[u8]) -> bool {
             false
         }
-        fn read(&mut self, _: u64) -> Option<Vec<u8>> {
+        fn read(&mut self, _: Duration) -> Option<Vec<u8>> {
             None
         }
         fn set_feature(&mut self, _: &[u8]) -> bool {
@@ -1004,7 +1005,14 @@ mod tests {
         fn get_feature(&mut self, _: u8) -> Option<Vec<u8>> {
             None
         }
+        fn get_feature_len(&mut self, _: u8, _: usize) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_input(&mut self, _: u8) -> Option<Vec<u8>> {
+            None
+        }
         fn flush(&mut self) {}
+        fn sleep(&mut self, _: Duration) {}
     }
 
     #[test]
@@ -1013,12 +1021,16 @@ mod tests {
         r[0] = 0xB4;
         r[20] = 128 + 45;
         assert_eq!(motospeed_parse(&r), Some((45, true)));
-        let mut f = Fake::with(|s, _, kind, q| {
-            assert_eq!((kind, q), (Sent::Write, &[0xB5, 0x06][..]));
-            let mut r = vec![0u8; 33];
-            r[0] = 0xB4;
-            r[20] = 77;
-            s.push_input("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::Write(_)));
+                assert_eq!(q, &[0xB5, 0x06][..]);
+                let mut r = vec![0u8; 33];
+                r[0] = 0xB4;
+                r[20] = 77;
+                s.push_input("", r);
+            }
+            fake::queued(s, fc, op)
         });
         let out = motospeed_with(
             &[coll(MOTOSPEED_VID, 0xFFE0, 4, 0xFF00, 1, 33, 33, 0)],
@@ -1050,9 +1062,12 @@ mod tests {
         let mut bad = aj179_reply(80, 0, 1);
         bad[31] ^= 1;
         assert!(!aj179_valid(&bad));
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q, [0x00, 0x10]);
-            s.push_input("", aj179_reply(80, 1, 1));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q, [0x00, 0x10]);
+                s.push_input("", aj179_reply(80, 1, 1));
+            }
+            fake::queued(s, fc, op)
         });
         let out = ajazz_with(
             &[coll(AJAZZ_RECEIVER_VID, 0x1234, 2, 0xFF00, 1, 33, 33, 0)],
@@ -1064,7 +1079,12 @@ mod tests {
             ("Ajazz AJ179", Some(80), true)
         );
         assert_eq!(out[0].key, "ajazz:249A:1234");
-        let mut f = Fake::with(|s, _, _, _| s.push_input("", aj179_reply(80, 0, 0)));
+        let mut f = Fake::with(|s, fc, op| {
+            if op.sent().is_some() {
+                s.push_input("", aj179_reply(80, 0, 0));
+            }
+            fake::queued(s, fc, op)
+        });
         let out = ajazz_with(
             &[coll(AJAZZ_RECEIVER_VID, 0x1234, 2, 0xFF00, 1, 33, 33, 0)],
             &mut f,
@@ -1078,10 +1098,14 @@ mod tests {
         assert_eq!(aj_series_parse(&[5, 0, 0, 77]), Some(77));
         assert_eq!(aj_series_parse(&[5, 1, 0, 77]), None);
         assert_eq!(aj_series_parse(&[5, 0, 0, 101]), None);
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q[..2], [0x00, 0xF7]);
-            s.push_feature("", vec![5, 0, 0, 58]);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q[..2], [0x00, 0xF7]);
+                s.push_feature("", vec![5, 0, 0, 58]);
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let mut c = coll(AJ_SERIES_VID, 0x5007, 2, 0xFFFF, 2, 0, 0, 65);
         c.product = "AJ159 APEX".into();
         let out = ajazz_with(&[c], &mut f, &mut 0);
@@ -1093,13 +1117,16 @@ mod tests {
 
     #[test]
     fn aj139_tries_the_second_request_variant() {
-        let mut f = Fake::with(|s, _, _, q| {
-            if q[4] == 0x0B {
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent()
+                && q[4] == 0x0B
+            {
                 let mut r = vec![0u8; 64];
                 r[..2].copy_from_slice(&[0xAA, 0x30]);
                 r[8] = 66;
                 s.push_input("", r);
             }
+            fake::queued(s, fc, op)
         });
         let out = ajazz_with(
             &[coll(
@@ -1116,7 +1143,7 @@ mod tests {
             &mut 0,
         );
         assert_eq!(out[0].percent, Some(66));
-        assert_eq!(f.s().sent.len(), 2);
+        assert_eq!(f.s().sends(), 2);
     }
 
     #[test]
@@ -1141,16 +1168,20 @@ mod tests {
         r[18] = 0;
         assert!(!delux_parse(&r).unwrap().connected);
         let mut seq = 0;
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q[..3], [0x0C, 0x01, 0x20]);
-            let mut r = vec![0u8; 33];
-            r[0] = 0x0C;
-            r[2] = 0x20;
-            r[6] = 1;
-            r[18] = 42;
-            r[19] = 1;
-            s.push_feature("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q[..3], [0x0C, 0x01, 0x20]);
+                let mut r = vec![0u8; 33];
+                r[0] = 0x0C;
+                r[2] = 0x20;
+                r[6] = 1;
+                r[18] = 42;
+                r[19] = 1;
+                s.push_feature("", r);
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let out = ajazz_with(
             &[coll(DELUX_VID, DELUX_RECEIVER, 0, 0xFF00, 1, 0, 0, 33)],
             &mut f,
@@ -1170,14 +1201,18 @@ mod tests {
         assert_eq!(w1_model(&[9, 0x8F, 0, 18]), Some(18));
         assert_eq!(w1_model(&[9, 0x8F, 0, 2]), Some(0));
         // A dongle that answers 8F with an Incott model code is read with the Incott query.
-        let mut f = Fake::with(|s, _, _, q| {
-            let r = if q[1] == 0x8F {
-                vec![9, 0x8F, 0, 2, 0, 0, 0, 0, 0]
-            } else {
-                vec![9, 0x89, 73, 0x31, 0, 0, 0, 0, 0]
-            };
-            s.push_feature("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                let r = if q[1] == 0x8F {
+                    vec![9, 0x8F, 0, 2, 0, 0, 0, 0, 0]
+                } else {
+                    vec![9, 0x89, 73, 0x31, 0, 0, 0, 0, 0]
+                };
+                s.push_feature("", r);
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let mut known = [0, 0];
         let out = pixart_with(
             &[coll(PIXART_VID, 0x522C, 1, 0xFF05, 1, 9, 0, 9)],

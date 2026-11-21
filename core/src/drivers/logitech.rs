@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 
 use crate::device::{Device, Kind, guess_kind, interpolate};
-use crate::drivers::hid_util::physical_key;
+use crate::drivers::hid::physical_key;
 
 pub const VID: u16 = 0x046D;
 /// Our software id; replies to other apps (G HUB, Options+) carry theirs and are ignored.

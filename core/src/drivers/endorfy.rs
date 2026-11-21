@@ -14,7 +14,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x3738;
 pub const PID: u16 = 0x0072;
@@ -46,18 +46,18 @@ pub fn battery_percent(r: &[u8]) -> Option<u8> {
     None
 }
 
-pub fn read_level(io: &mut dyn Io) -> Option<u8> {
+pub fn read_level(io: &mut dyn Dev) -> Option<u8> {
     // Report 07 still holds the previous answer, so a read identical to it is not taken as the new
     // one (except the last read, so a steady level is still shown).
-    let before = io.get_input_report(0x07).unwrap_or_default();
+    let before = io.get_input(0x07).unwrap_or_default();
     let mut req = [0u8; REPORT_LEN as usize];
     req[..10].copy_from_slice(&[0x06, 0x07, 0x80, 0x05, 0x5A, 0x03, 0x00, 0xD6, 0x0C, 0x00]);
     if !io.write(&req) {
         return None;
     }
     for i in 0..READS {
-        io.sleep(READ_DELAY_MS);
-        let Some(r) = io.get_input_report(0x07) else {
+        io.sleep(Duration::from_millis(READ_DELAY_MS));
+        let Some(r) = io.get_input(0x07) else {
             continue;
         };
         if !before.is_empty() && r == before && i + 1 < READS {
@@ -70,14 +70,14 @@ pub fn read_level(io: &mut dyn Io) -> Option<u8> {
     None
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let found = find(colls, VID, PID, |c| {
         c.page == 0xFF13 && c.usage == 0x0001 && c.in_len == REPORT_LEN && c.out_len == REPORT_LEN
     });
     // Headset off or no answer: left out, the last level stays for the grace period.
     let Some(level) = found
         .first()
-        .and_then(|c| open(c))
+        .and_then(|c| hid.open(c))
         .and_then(|mut io| read_level(io.as_mut()))
     else {
         return Vec::new();
@@ -94,14 +94,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn report(frames: &[u8]) -> Vec<u8> {
         let mut r = vec![0x07, frames.len() as u8, 0x80];
@@ -129,10 +128,11 @@ mod tests {
         let mut new = BATTERY;
         new[8] = 65;
         let f = Fake::new();
-        f.s().inputs = vec![old.clone(), old, report(&new)].into();
-        let opened = RefCell::new(Vec::new());
+        f.s()
+            .input_reports
+            .insert(String::new(), vec![old.clone(), old, report(&new)].into());
         let c = Coll::new(VID, PID, 0xFF13, 1, 62, 62);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].key, "endorfy:viro");
         assert_eq!(out[0].percent, Some(65));
         assert_eq!(out[0].grace, Duration::from_secs(180));

@@ -15,7 +15,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind, guess_kind};
-use crate::drivers::report_io::{self, Coll, Hid, device, find, products};
+use crate::drivers::hid::{self, Coll, Hid, find, products};
 
 /// Sinowealth's vendor id, used by Glorious and other brands on the same chip.
 pub const VID_SINOWEALTH: u16 = 0x258A;
@@ -137,14 +137,14 @@ fn sinowealth_kind(colls: &[Coll], vid: u16, pid: u16, name: &str) -> Kind {
     if keyboards >= 2 {
         return Kind::Keyboard;
     }
-    report_io::kind_from_colls(colls, vid, pid)
+    hid::kind_from_colls(colls, vid, pid)
 }
 
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let mut out = Vec::new();
     for v in VENDORS {
         for (vid, pid) in products(colls).into_iter().filter(|p| p.0 == v.vid) {
-            for c in find(colls, vid, pid, |c| c.feature == 65 && (v.matches)(c)) {
+            for c in find(colls, vid, pid, |c| c.feat_len == 65 && (v.matches)(c)) {
                 let Some(mut d) = hid.open(c) else { continue };
                 let mut reply = None;
                 for attempt in 0..2 {
@@ -188,7 +188,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
                         (n, k)
                     }
                 };
-                let mut s = device(
+                let mut s = Device::new(
                     format!("{}{pid:04X}", v.key_prefix),
                     name,
                     kind,
@@ -216,13 +216,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     fn reply(status: u8, charging: u8, pct: u8) -> Vec<u8> {
@@ -238,12 +238,12 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, request());
                 Some(vec![])
             }
-            Op::GetFeature(0) => q.pop_front(),
+            Op::GetFeature(0, _) => q.pop_front(),
             _ => None,
         })
     }
@@ -252,7 +252,7 @@ mod tests {
         Coll {
             vid,
             pid,
-            feature: 65,
+            feat_len: 65,
             page: 0xFFFF,
             ..Default::default()
         }
@@ -301,11 +301,11 @@ mod tests {
         assert!(poll_with(&mut fake(vec![r]), &[coll(0x258A, 0x2022)]).is_empty());
         let mut f = fake(vec![]);
         let mut short = coll(0x258A, 0x2022);
-        short.feature = 64;
+        short.feat_len = 64;
         let mut ying = coll(0x36A7, 0xA874);
         ying.usage = 1;
         assert!(poll_with(&mut f, &[short, ying]).is_empty());
-        assert_eq!(f.opens.get(), 0);
+        assert_eq!(f.s().opened.len(), 0);
         let out = poll_with(&mut fake(vec![reply(0xA1, 0, 61)]), &[coll(0x36A7, 0xA874)]);
         assert_eq!(
             (out[0].name.as_str(), out[0].key.as_str()),

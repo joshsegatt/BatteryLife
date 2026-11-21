@@ -3,7 +3,7 @@
 
 pub mod bluetooth;
 pub mod generic_hid;
-pub mod hid_util;
+pub mod hid;
 pub mod logitech;
 pub mod phonelink;
 pub mod xbox;
@@ -17,7 +17,6 @@ pub mod lamzu;
 pub mod ninjutso;
 pub mod pulsar;
 pub mod razer;
-pub mod report_io;
 pub mod scyrox;
 pub mod steelseries;
 pub mod vaxee;
@@ -25,7 +24,7 @@ pub mod vgn;
 pub mod wlmouse;
 pub mod zowie;
 
-// Keyboard batch ported from BatteryHub, and the HID plumbing it shares.
+// Keyboard batch ported from BatteryHub.
 pub mod ajazz_ak992;
 pub mod akko;
 pub mod atk_keyboard;
@@ -33,7 +32,6 @@ pub mod aula;
 pub mod cherry;
 pub mod dareu;
 pub mod darkrim;
-pub mod hidport;
 pub mod keychron;
 pub mod machenike;
 pub mod mchose_keyboard;
@@ -46,7 +44,7 @@ pub mod semico;
 pub mod sonix;
 pub mod via_dongle;
 
-// Headsets ported from BatteryHub, with their shared report I/O.
+// Headsets ported from BatteryHub.
 pub mod akg;
 pub mod alienware;
 pub mod astro;
@@ -54,7 +52,6 @@ pub mod audeze;
 pub mod barracuda_pro;
 pub mod endorfy;
 pub mod fractal;
-pub mod hid_io;
 pub mod hyperx;
 pub mod jabra;
 pub mod jbl;
@@ -69,7 +66,7 @@ pub mod sony_inzone;
 pub mod steelseries_elite;
 pub mod turtlebeach;
 
-// Wireless mice, part B (BatteryHub ports) and their shared testable HID layer.
+// Wireless mice, part B (BatteryHub ports).
 pub mod arbiter;
 pub mod areson;
 pub mod atk_bitmouse;
@@ -79,7 +76,6 @@ pub mod coolermaster;
 pub mod darmoshark;
 pub mod eweadn;
 pub mod fantech;
-pub mod hid_dev;
 pub mod kysona;
 pub mod mchose;
 pub mod mchose_a5;

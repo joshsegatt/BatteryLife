@@ -9,14 +9,12 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits
 //! qu1ncky/BatteryTray (RongyuanDongleProvider, MIT) and the ATTACK SHARK web driver.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 use crate::registry::Match;
 
 /// Receiver ids from BatteryHub's list.
@@ -180,19 +178,19 @@ fn brand(product: &str) -> String {
         .join(" ")
 }
 
-fn query_status(port: &mut dyn Port, feat_len: u16) -> Option<Vec<u8>> {
+fn query_status(port: &mut dyn Dev, feat_len: u16) -> Option<Vec<u8>> {
     for attempt in 0..3 {
         if attempt > 0 {
-            port.pause(Duration::from_millis(100));
+            port.sleep(Duration::from_millis(100));
         }
         let mut cmd = vec![0u8; usize::from(feat_len)];
         cmd[1] = 0xF7;
         if !port.set_feature(&cmd) {
             return None;
         }
-        port.pause(Duration::from_millis(20));
+        port.sleep(Duration::from_millis(20));
         if let Some(r) = port
-            .get_feature(0, usize::from(feat_len))
+            .get_feature_len(0, usize::from(feat_len))
             .filter(|r| r.len() >= 7 && r[2..7].iter().any(|b| *b != 0))
         {
             return Some(r);
@@ -249,7 +247,7 @@ pub fn slots(r: &[u8], vid: u16, pid: u16, product: &str) -> Vec<Device> {
     out
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
     let mut done: Vec<(u16, u16)> = Vec::new();
     for c in colls {
@@ -263,7 +261,9 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
         {
             continue;
         }
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         let Some(r) = query_status(port.as_mut(), c.feat_len) else {
             continue;
         };
@@ -274,14 +274,15 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, feature_script};
 
+    /// Feature reads go to `feature(state, path, id, len)`; a flush drops queued replies.
     #[test]
     fn matches_list_every_receiver_once() {
         let mut from_matches: Vec<(u16, u16)> = MATCHES
@@ -327,14 +328,11 @@ mod tests {
         c
     }
 
-    fn device(status: [u8; 7]) -> fake::Shared {
-        let s = fake::script();
-        let log = s.clone();
-        s.borrow_mut().feature = Some(Box::new(move |_, id, len| {
+    fn device(status: [u8; 7]) -> Fake {
+        feature_script(move |log, _, id, len| {
             assert_eq!((id, len), (0, 65));
             let asked = log
-                .borrow()
-                .features
+                .features()
                 .last()
                 .is_some_and(|f| f.len() == 65 && f[1] == 0xF7);
             let mut r = vec![0u8; len];
@@ -342,8 +340,7 @@ mod tests {
                 r[..7].copy_from_slice(&status);
             }
             Some(r)
-        }));
-        s
+        })
     }
 
     #[test]
@@ -351,9 +348,9 @@ mod tests {
         let s = device([0, 1, 80, 45, 0, 0, 0]);
         let out = poll_with(
             &[receiver(0x3151, 0x402D, "2.4G Wireless Receiver")],
-            &mut fake::opener(&s),
+            &mut s.clone(),
         );
-        assert_eq!(s.borrow().features.len(), 1);
+        assert_eq!(s.s().features().len(), 1);
         assert_eq!(out.len(), 2);
         assert_eq!(
             (out[0].key.as_str(), out[0].kind, out[0].percent),
@@ -369,10 +366,7 @@ mod tests {
     fn offline_slot_and_unknown_level() {
         // Keyboard offline; mouse connected but reporting 0 (unknown level).
         let s = device([0, 1, 0, 0, 1, 0, 0]);
-        let out = poll_with(
-            &[receiver(0x342D, 0xE3E0, "AJAZZ 2.4G 8K")],
-            &mut fake::opener(&s),
-        );
+        let out = poll_with(&[receiver(0x342D, 0xE3E0, "AJAZZ 2.4G 8K")], &mut s.clone());
         assert_eq!(out.len(), 1);
         assert_eq!(
             (out[0].name.as_str(), out[0].percent),
@@ -383,13 +377,13 @@ mod tests {
     #[test]
     fn silent_receiver_and_strict_matching() {
         let s = device([0; 7]);
-        assert!(poll_with(&[receiver(0x3151, 0x402D, "")], &mut fake::opener(&s)).is_empty());
-        assert_eq!(s.borrow().features.len(), 3);
+        assert!(poll_with(&[receiver(0x3151, 0x402D, "")], &mut s.clone()).is_empty());
+        assert_eq!(s.s().features().len(), 3);
         let mut other_iface = receiver(0x3151, 0x402D, "");
         other_iface.iface = 1;
         let s = device([0, 1, 80, 45, 0, 0, 0]);
         let colls = [other_iface, receiver(0x3151, 0x1234, "")];
-        assert!(poll_with(&colls, &mut fake::opener(&s)).is_empty());
-        assert!(s.borrow().opened.is_empty());
+        assert!(poll_with(&colls, &mut s.clone()).is_empty());
+        assert!(s.s().opened.is_empty());
     }
 }

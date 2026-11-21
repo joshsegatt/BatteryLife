@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left};
 use crate::registry::Match;
 
 const VID: u16 = 0x248A;
@@ -50,7 +50,7 @@ pub static MATCHES: &[Match] = &[
 ];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 fn id_at(r: &[u8], at: usize) -> u16 {
@@ -79,7 +79,7 @@ fn query(d: &mut dyn Dev, opcode: u8, receiver_end: Instant) -> Option<Vec<u8>> 
         return None;
     }
     while Instant::now() < end {
-        let wait = ms_left(end).clamp(1, 20);
+        let wait = left(end).clamp(Duration::from_millis(1), Duration::from_millis(20));
         if let Some(i) = d.read(wait)
             && i.len() >= 3
             && i[..3] == [0x54, 0xE4, 2]
@@ -142,8 +142,11 @@ fn nrf_read(d: &mut dyn Dev, end: Instant) -> Option<u8> {
         return None;
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
-    while ms_left(end) > 0 {
-        if let Some(p) = d.read(ms_left(end).min(100)).and_then(|r| nrf_parse(&r)) {
+    while !left(end).is_zero() {
+        if let Some(p) = d
+            .read(left(end).min(Duration::from_millis(100)))
+            .and_then(|r| nrf_parse(&r))
+        {
             return Some(p);
         }
     }
@@ -158,7 +161,7 @@ fn mouse(key: String, name: &str, pct: u8) -> Device {
     s
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out: Vec<Device> = Vec::new();
     for (receiver, mouse_pid, name) in MODELS {
@@ -197,7 +200,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
     for c in find(colls, NRF_VID, NRF_RECEIVER, |c| {
         c.iface == 3 && c.page == 0xFF0A && c.usage == 1 && c.in_len == 65 && c.out_len == 65
     }) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             break;
         }
         if let Some(pct) = io.open(c).and_then(|mut d| nrf_read(d.as_mut(), end)) {
@@ -215,7 +218,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     fn bond(mouse: u16) -> Vec<u8> {
         let mut r = vec![0u8; 1001];
@@ -240,16 +243,20 @@ mod tests {
 
     #[test]
     fn m3_reads_bond_then_identify() {
-        let mut f = Fake::with(|s, _, kind, q| {
-            assert_eq!(kind, Sent::Feature);
-            assert_eq!(q[0], FEATURE);
-            let r = if q[1] == BOND {
-                bond(0xFF12)
-            } else {
-                identify(0xFF12, 63)
-            };
-            s.push_feature("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetFeature(_)));
+                assert_eq!(q[0], FEATURE);
+                let r = if q[1] == BOND {
+                    bond(0xFF12)
+                } else {
+                    identify(0xFF12, 63)
+                };
+                s.push_feature("", r);
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let rx = coll(VID, 0xFF30, 1, 0x008C, 1, 33, 33, 1001);
         let out = poll_with(&[rx], &mut f);
         assert_eq!(out.len(), 1);

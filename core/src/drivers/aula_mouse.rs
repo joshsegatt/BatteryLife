@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{Coll, Dev, HidIo, Io, colls, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 use crate::registry::Match;
 
 const VID: u16 = 0x320F;
@@ -27,7 +27,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn request(cmd: u8) -> [u8; 64] {
@@ -63,7 +63,7 @@ fn wait_reply(d: &mut dyn Dev, cmd: u8, end: Instant, link_down: &mut bool) -> O
         if left == 0 {
             break;
         }
-        let Some(r) = d.read(left.min(100)) else {
+        let Some(r) = d.read(Duration::from_millis(left.min(100))) else {
             continue;
         };
         if is_heartbeat(&r) {
@@ -99,7 +99,7 @@ fn read_battery(d: &mut dyn Dev, link_down: &mut bool) -> Option<(u8, bool)> {
     valid
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     for c in find(colls, VID, PID, |c| {
         c.iface == 1 && c.page == 0xFF1C && c.usage == 0x0092 && c.in_len == 64 && c.out_len == 64
     }) {
@@ -132,7 +132,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
     use std::sync::{Arc, Mutex};
 
     fn dongle() -> Coll {
@@ -143,24 +143,26 @@ mod tests {
 
     /// The receiver of aula_mouse_driver_test: echoes START / END, answers 1A after short frames.
     fn receiver(battery: Arc<Mutex<Vec<u8>>>, down: bool, silent: bool) -> Fake {
-        Fake::with(move |s, _, kind, q| {
-            assert_eq!(kind, Sent::Write);
-            assert!(q.len() == 64 && q[0] == 4 && [1, 2, 0x1A].contains(&q[3]));
-            if silent {
-                return;
-            }
-            if q[3] == 0x1A {
-                // Short battery frames must not hide a complete reply queued after them.
-                s.push_input("", vec![4, 0, 0, 0x1A]);
-                s.push_input("", vec![4, 0, 0, 0x1A, 0, 0, 0, 0]);
-                s.push_input("", vec![4, 0, 0, 0x1A, 0, 0, 0, 0, 86]);
-                if down {
-                    s.push_input("", vec![4, 0xAA, 0, 0xAA, 0, 0, 0, 0, 0]);
+        Fake::with(move |s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::Write(_)));
+                assert!(q.len() == 64 && q[0] == 4 && [1, 2, 0x1A].contains(&q[3]));
+                if silent {
+                    // sent, nothing answered
+                } else if q[3] == 0x1A {
+                    // Short battery frames must not hide a complete reply queued after them.
+                    s.push_input("", vec![4, 0, 0, 0x1A]);
+                    s.push_input("", vec![4, 0, 0, 0x1A, 0, 0, 0, 0]);
+                    s.push_input("", vec![4, 0, 0, 0x1A, 0, 0, 0, 0, 86]);
+                    if down {
+                        s.push_input("", vec![4, 0xAA, 0, 0xAA, 0, 0, 0, 0, 0]);
+                    }
+                    s.push_input("", battery.lock().unwrap().clone());
+                } else {
+                    s.push_input("", q.to_vec());
                 }
-                s.push_input("", battery.lock().unwrap().clone());
-            } else {
-                s.push_input("", q.to_vec());
             }
+            fake::queued(s, fc, op)
         })
     }
 
@@ -178,7 +180,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].percent, out[0].charging), (Some(86), false));
         assert_eq!(out[0].kind, Kind::Mouse);
-        let w = f.s().sent_of(Sent::Write);
+        let w = f.s().writes();
         assert_eq!(w.iter().map(|q| q[3]).collect::<Vec<_>>(), [1, 0x1A, 2]);
         for charge in [1, 2] {
             let out = poll_with(
@@ -216,18 +218,18 @@ mod tests {
             }
             let mut f = receiver(battery(86, 0), false, false);
             assert!(poll_with(&[c], &mut f).is_empty());
-            assert_eq!(f.s().opens, 0);
+            assert_eq!(f.s().opened.len(), 0);
         }
         let mut f = receiver(battery(86, 0), false, false);
         f.s().refuse_open = true;
         let out = poll_with(&[dongle()], &mut f);
-        assert!(f.s().sent.is_empty() && out[0].asleep);
+        assert!(f.s().sends() == 0 && out[0].asleep);
 
         let mut f = receiver(battery(86, 0), false, true);
         let start = Instant::now();
         let out = poll_with(&[dongle()], &mut f);
         assert!(start.elapsed() < Duration::from_millis(1200) && out[0].asleep);
-        let w = f.s().sent_of(Sent::Write);
+        let w = f.s().writes();
         assert_eq!(w.len(), 2);
         assert_eq!(w[1][3], 2, "END is sent even without a START reply");
     }

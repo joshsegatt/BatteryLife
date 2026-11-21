@@ -15,7 +15,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind, guess_kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, device, find, products};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find, products};
 
 pub const VID: u16 = 0x1532;
 
@@ -186,7 +186,7 @@ fn kind(colls: &[Coll], vid: u16, pid: u16, name: &str) -> Kind {
     if vid == VID && MOUSE_PIDS.contains(&pid) {
         return Kind::Mouse;
     }
-    match report_io::kind_from_colls(colls, vid, pid) {
+    match hid::kind_from_colls(colls, vid, pid) {
         Kind::Other => guess_kind(name),
         k => k,
     }
@@ -197,7 +197,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     // (its cable) replaces it, then dropped; the tracker keeps the last level while it sleeps.
     let mut found: Vec<(Device, bool)> = Vec::new();
     for (vid, pid) in products(colls) {
-        for c in find(colls, vid, pid, |c| c.feature == 91) {
+        for c in find(colls, vid, pid, |c| c.feat_len == 91) {
             let Some(mut d) = hid.open(c) else { continue };
             let kb_tid = keyboard_battery_tid(pid);
             let tids: &[u8] = if kb_tid != 0 {
@@ -222,7 +222,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             }
 
             let name = clean_name(&c.product);
-            let mut s = device(
+            let mut s = Device::new(
                 format!("razer:{pid:04X}"),
                 name.as_str(),
                 kind(colls, vid, pid, &name),
@@ -259,16 +259,15 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::HashMap;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Copy)]
     struct State {
@@ -281,7 +280,7 @@ mod tests {
         Coll {
             vid: VID,
             pid,
-            feature: 91,
+            feat_len: 91,
             product: "Razer Test Keyboard".into(),
             path: format!("razer-{pid:04X}"),
             ..Default::default()
@@ -291,15 +290,15 @@ mod tests {
     /// The feature-report mailbox of razer_connection_test.cpp: the reply echoes the last request
     /// with the status and args[1] filled in and the crc recomputed.
     fn mailbox(states: HashMap<u16, State>) -> Fake {
-        let request = Rc::new(RefCell::new(Vec::new()));
-        Fake::new(move |c, op| match op {
+        let request = Arc::new(Mutex::new(Vec::new()));
+        Fake::with(move |_, c, op| match op.clone() {
             Op::SetFeature(q) => {
                 assert!(q.len() == 91 && q[7] == 7 && (q[8] == 0x80 || q[8] == 0x84));
-                *request.borrow_mut() = q;
+                *request.lock().unwrap() = q;
                 Some(vec![])
             }
-            Op::GetFeature(_) => {
-                let mut r = request.borrow().clone();
+            Op::GetFeature(_, _) => {
+                let mut r = request.lock().unwrap().clone();
                 let s = states[&c.pid];
                 r[1] = if s.online { 2 } else { 4 };
                 r[10] = if r[8] == 0x80 {

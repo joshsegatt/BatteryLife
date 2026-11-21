@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x413C;
 pub const PID: u16 = 0xA515;
@@ -36,7 +36,7 @@ pub fn decode(r: &[u8]) -> Option<(u8, bool)> {
     (pct <= 100).then_some((pct, r[7] == 1))
 }
 
-fn query(io: &mut dyn Io) -> Option<(u8, bool)> {
+fn query(io: &mut dyn Dev) -> Option<(u8, bool)> {
     let mut req = [0u8; 62];
     req[..3].copy_from_slice(&[0x06, 0xC0, 0x0A]);
     let deadline = Instant::now() + TOTAL;
@@ -45,13 +45,15 @@ fn query(io: &mut dyn Io) -> Option<(u8, bool)> {
             break;
         }
         // Take the reply if it also arrives as an interrupt report.
-        if let Some(b) = io.set_output_and_read(&req, 20).and_then(|r| decode(&r)) {
+        if io.set_output(&req)
+            && let Some(b) = io.read(Duration::from_millis(20)).and_then(|r| decode(&r))
+        {
             return Some(b);
         }
         let attempt_end = deadline.min(Instant::now() + ATTEMPT);
         loop {
-            io.sleep(15);
-            if let Some(b) = io.get_input_report(0x07).and_then(|r| decode(&r)) {
+            io.sleep(Duration::from_millis(15));
+            if let Some(b) = io.get_input(0x07).and_then(|r| decode(&r)) {
                 return Some(b);
             }
             if Instant::now() >= attempt_end {
@@ -62,11 +64,11 @@ fn query(io: &mut dyn Io) -> Option<(u8, bool)> {
     None
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     for c in find(colls, VID, PID, |c| {
         c.iface == 5 && c.page == 0xFF13 && c.usage == 0x0001 && c.in_len == 62 && c.out_len == 62
     }) {
-        let Some(mut io) = open(c) else { continue };
+        let Some(mut io) = hid.open(c) else { continue };
         // Headset off, out of range, or every query dropped: left out, the last level stays for
         // the grace period.
         let Some((pct, charging)) = query(io.as_mut()) else {
@@ -87,15 +89,14 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     // tests/alienware_driver_test.cpp
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op, queued};
     use std::collections::VecDeque;
 
     fn report(head: &[u8]) -> Vec<u8> {
@@ -142,10 +143,13 @@ mod tests {
 
     /// The dongle answers "busy" until `answer_on` queries were sent, then the queued replies.
     fn dongle(replies: Vec<Vec<u8>>, answer_on: usize, repeat: bool) -> Fake {
-        let f = Fake::new();
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        f.s().on_input = Some(Box::new(move |id, sends| {
-            assert_eq!(id, 0x07);
+        Fake::with(move |s, c, op| {
+            let Op::GetInput(id) = op else {
+                return queued(s, c, op);
+            };
+            assert_eq!(*id, 0x07);
+            let sends = s.outputs().len();
             if q.is_empty() || sends < answer_on {
                 return Some(busy());
             }
@@ -154,15 +158,19 @@ mod tests {
             } else {
                 q.pop_front()
             }
-        }));
-        f
+        })
     }
 
     fn run(f: &Fake) -> (Vec<Device>, usize) {
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[consumer(), collection()], &mut *f.opener(&opened));
-        assert!(opened.borrow().iter().all(|c| c.page == 0xFF13));
-        let n = opened.borrow().len();
+        let colls = [consumer(), collection()];
+        let out = poll_colls(&colls, &mut f.clone());
+        assert!(
+            f.s()
+                .opened
+                .iter()
+                .all(|p| colls.iter().any(|c| c.path == *p && c.page == 0xFF13))
+        );
+        let n = f.s().opened.len();
         (out, n)
     }
 
@@ -171,7 +179,7 @@ mod tests {
         let f = dongle(replies, 1, false);
         let (out, opens) = run(&f);
         let s = f.s();
-        assert_eq!((opens, s.outputs.len(), s.input_reads), (1, 1, n));
+        assert_eq!((opens, s.outputs().len(), s.input_reads()), (1, 1, n));
         assert_eq!((out[0].percent, out[0].charging), (Some(pct), charging));
     }
 
@@ -180,8 +188,8 @@ mod tests {
         assert_eq!(battery(0x5F, 0, 0, None, 0x02), captured2());
         let f = dongle(vec![busy(), busy(), captured()], 1, false);
         let (out, _) = run(&f);
-        assert_eq!(f.s().outputs, vec![report(&[0x06, 0xC0, 0x0A])]);
-        assert_eq!(f.s().input_reads, 3);
+        assert_eq!(f.s().outputs(), vec![report(&[0x06, 0xC0, 0x0A])]);
+        assert_eq!(f.s().input_reads(), 3);
         let d = &out[0];
         assert_eq!((d.percent, d.charging, d.asleep), (Some(95), false, false));
         assert_eq!(
@@ -214,13 +222,13 @@ mod tests {
     #[test]
     fn interrupt_reply_is_used_directly() {
         let f = dongle(vec![], 1, false);
-        f.s().output_reply = Some(captured());
+        f.queue(vec![captured()]); // answered right after the output report
         let (out, _) = run(&f);
-        assert_eq!((out[0].percent, f.s().input_reads), (Some(95), 0));
+        assert_eq!((out[0].percent, f.s().input_reads()), (Some(95), 0));
         let f = dongle(vec![captured()], 1, false);
-        f.s().output_reply = Some(busy());
+        f.queue(vec![busy()]);
         let (out, _) = run(&f);
-        assert_eq!((out[0].percent, f.s().input_reads), (Some(95), 1));
+        assert_eq!((out[0].percent, f.s().input_reads()), (Some(95), 1));
     }
 
     #[test]
@@ -244,7 +252,7 @@ mod tests {
         ];
         let f = dongle(replies, 1, false);
         let (out, _) = run(&f);
-        assert_eq!((out[0].percent, f.s().input_reads), (Some(42), 8));
+        assert_eq!((out[0].percent, f.s().input_reads()), (Some(42), 8));
     }
 
     #[test]
@@ -255,7 +263,7 @@ mod tests {
             let (out, _) = run(&f);
             assert!(start.elapsed() < Duration::from_millis(800));
             assert_eq!(
-                (out[0].percent, f.s().outputs.len()),
+                (out[0].percent, f.s().outputs().len()),
                 (Some(95), answered_by)
             );
         }
@@ -268,7 +276,7 @@ mod tests {
         let (out, _) = run(&f);
         assert!(start.elapsed() < Duration::from_millis(800));
         assert!(out.is_empty());
-        assert_eq!(f.s().outputs.len(), 3);
+        assert_eq!(f.s().outputs().len(), 3);
         let mut bad = captured();
         bad[13] ^= 1;
         let f = dongle(vec![bad], 1, true);
@@ -289,9 +297,8 @@ mod tests {
                 _ => c.out_len = 61,
             }
             let f = dongle(vec![captured()], 1, false);
-            let opened = RefCell::new(Vec::new());
-            assert!(poll_colls(&[c], &mut *f.opener(&opened)).is_empty());
-            assert!(opened.borrow().is_empty());
+            assert!(poll_colls(&[c], &mut f.clone()).is_empty());
+            assert!(f.s().opened.is_empty());
         }
     }
 }

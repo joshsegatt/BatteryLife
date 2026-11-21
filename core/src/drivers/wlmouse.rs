@@ -14,7 +14,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, device, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x36A7;
 
@@ -105,7 +105,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
         if covered.contains(&pid) {
             continue;
         }
-        let mut cs = find(colls, VID, pid, |c| c.page == 0xFFFF && c.feature >= 65);
+        let mut cs = find(colls, VID, pid, |c| c.page == 0xFFFF && c.feat_len >= 65);
         // Usage 0 is the collection that answers in both sources; try it first.
         cs.sort_by_key(|c| c.usage != 0);
         for c in cs {
@@ -113,7 +113,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             let Some(reply) = query(hid, d.as_mut()) else {
                 continue;
             };
-            let mut s = device(
+            let mut s = Device::new(
                 format!("wlmouse:{pid:04X}"),
                 name,
                 Kind::Mouse,
@@ -144,13 +144,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     fn reply(status: u8, chg: u8, pct: u8) -> Vec<u8> {
@@ -166,12 +166,12 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, request());
                 Some(vec![])
             }
-            Op::GetFeature(0) => q.pop_front(),
+            Op::GetFeature(0, _) => q.pop_front(),
             _ => None,
         })
     }
@@ -182,7 +182,7 @@ mod tests {
             pid,
             page: 0xFFFF,
             usage,
-            feature: 65,
+            feat_len: 65,
             path: format!("{pid:04X}-{usage}"),
             ..Default::default()
         }
@@ -202,7 +202,7 @@ mod tests {
             (s.key.as_str(), s.via.as_str()),
             ("wlmouse:A883", "2.4 GHz receiver")
         );
-        assert_eq!(f.log.borrow()[0].0, "A883-0", "usage 0 first");
+        assert_eq!(f.s().log[0].0, "A883-0", "usage 0 first");
     }
 
     #[test]
@@ -218,6 +218,6 @@ mod tests {
         let out = poll_with(&mut f, &[coll(0xA878, 0), coll(0xA879, 0)]);
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].via.as_str(), out[0].charging), ("USB cable", true));
-        assert_eq!(f.opens.get(), 1);
+        assert_eq!(f.s().opened.len(), 1);
     }
 }

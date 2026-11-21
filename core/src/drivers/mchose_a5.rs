@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, HidIo, Io, colls, find, hex4, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Hid, find, hex4, left};
 use crate::registry::Match;
 
 const VID: u16 = 0x2023;
@@ -69,11 +69,9 @@ static ANSWERED: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut answered = ANSWERED.lock().unwrap_or_else(|e| e.into_inner());
-    poll_with(
-        &colls(infos),
-        &mut HidIo(api),
-        answered.get_or_insert_with(HashSet::new),
-    )
+    hid::run(api, infos, |hid, colls| {
+        poll_with(colls, hid, answered.get_or_insert_with(HashSet::new))
+    })
 }
 
 pub fn request(len: usize) -> Vec<u8> {
@@ -99,31 +97,31 @@ pub fn parse(r: &[u8]) -> Option<(u8, bool)> {
 
 /// Some(Some(..)) battery read, Some(None) collection works but the mouse is silent, None no channel.
 fn query(
-    d: &mut dyn crate::drivers::hid_dev::Dev,
-    io: &mut dyn Io,
+    d: &mut dyn crate::drivers::hid::Dev,
+    io: &mut dyn Hid,
     len: usize,
 ) -> Option<Option<(u8, bool)>> {
     let req = request(len);
     if !d.set_feature(&req) {
         return None;
     }
-    io.sleep(34);
+    io.sleep(Duration::from_millis(34));
     for attempt in 0..8 {
         if attempt == 3 {
             if !d.set_feature(&req) {
                 return None;
             }
-            io.sleep(34);
+            io.sleep(Duration::from_millis(34));
         }
         if let Some(b) = d.get_feature(0).and_then(|r| parse(&r)) {
             return Some(Some(b));
         }
-        io.sleep(30);
+        io.sleep(Duration::from_millis(30));
     }
     Some(None)
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io, answered: &mut HashSet<u16>) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid, answered: &mut HashSet<u16>) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     for m in &MODELS {
@@ -132,7 +130,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, answered: &mut HashSet<u16>) -> Ve
         cs.sort_by_key(|c| c.iface != 2);
         let mut state: Option<Option<(u8, bool)>> = None;
         for c in cs {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -176,7 +174,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, answered: &mut HashSet<u16>) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(charging: u8, level: u8, with_id: bool) -> Vec<u8> {
         let mut r = vec![0u8; 65];
@@ -210,10 +208,14 @@ mod tests {
         let mut silent = Fake::new();
         assert!(poll_with(std::slice::from_ref(&rx), &mut silent, &mut answered).is_empty());
 
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q[..7], [0, 0, 0, 2, 2, 0, 0x83]);
-            s.push_feature("", reply(0, 66, true));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q[..7], [0, 0, 0, 2, 2, 0, 0x83]);
+                s.push_feature("", reply(0, 66, true));
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         let out = poll_with(std::slice::from_ref(&rx), &mut f, &mut answered);
         assert_eq!(out[0].percent, Some(66));
 

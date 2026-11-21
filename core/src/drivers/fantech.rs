@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left, products};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x25A7;
@@ -28,7 +28,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn packet(cmd: u8) -> [u8; 17] {
@@ -93,20 +93,23 @@ fn query(
     }
     let mut found = None;
     let end = end.min(Instant::now() + Duration::from_millis(500));
-    while ms_left(end) > 0 {
+    while !left(end).is_zero() {
         if cmd_reads
             && let Some(c) = cmd
-                .read(ms_left(end).clamp(1, 40))
+                .read(left(end).clamp(Duration::from_millis(1), Duration::from_millis(40)))
                 .and_then(|r| parse_input(&r))
         {
             remember(c, &mut found);
         }
         for d in readers.iter_mut() {
-            let left = ms_left(end);
-            if left == 0 {
+            let left = left(end);
+            if left.is_zero() {
                 break;
             }
-            if let Some(c) = d.read(left.min(40)).and_then(|r| parse_input(&r)) {
+            if let Some(c) = d
+                .read(left.min(Duration::from_millis(40)))
+                .and_then(|r| parse_input(&r))
+            {
                 remember(c, &mut found);
             }
         }
@@ -126,11 +129,11 @@ fn parse_input(r: &[u8]) -> Option<Reply> {
     if r.len() < 6 { None } else { parse(r) }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
-    for pid in products(colls, VID) {
-        if ![WIRED, DONGLE, REDRAGON].contains(&pid) || ms_left(end) == 0 {
+    for pid in pids(colls, VID) {
+        if ![WIRED, DONGLE, REDRAGON].contains(&pid) || left(end).is_zero() {
             continue;
         }
         let all = find(colls, VID, pid, |_| true);
@@ -184,7 +187,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     fn reply(pct: u8, charging: u8) -> Vec<u8> {
         let mut r = packet(0x04).to_vec();
@@ -215,10 +218,14 @@ mod tests {
     fn reply_on_another_collection_is_read() {
         let feat = coll(VID, DONGLE, 1, 0xFF02, 2, 0, 0, 17);
         let input = coll(VID, DONGLE, 1, 0xFF01, 0, 17, 0, 0);
-        let path = input.path.to_string_lossy().to_string();
-        let mut f = Fake::with(move |s, _, kind, q| {
-            assert_eq!((kind, q), (Sent::Feature, &packet(4)[..]));
-            s.push_input(&path, reply(91, 0));
+        let path = input.path.clone();
+        let mut f = Fake::with(move |s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetFeature(_)));
+                assert_eq!(q, &packet(4)[..]);
+                s.push_input(&path, reply(91, 0));
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(&[feat, input], &mut f);
         assert_eq!(out.len(), 1);
@@ -231,7 +238,12 @@ mod tests {
     #[test]
     fn invader_pro_scales_tens() {
         let feat = coll(VID, REDRAGON, 1, 0xFF02, 2, 17, 0, 17);
-        let mut f = Fake::with(|s, _, _, _| s.push_input("", reply(7, 0)));
+        let mut f = Fake::with(|s, fc, op| {
+            if op.sent().is_some() {
+                s.push_input("", reply(7, 0));
+            }
+            fake::queued(s, fc, op)
+        });
         let out = poll_with(&[feat], &mut f);
         assert_eq!((out[0].percent, out[0].coarse), (Some(70), true));
         assert_eq!(out[0].name, "Redragon Invader Pro");

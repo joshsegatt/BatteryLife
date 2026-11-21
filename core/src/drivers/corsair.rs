@@ -17,7 +17,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind, guess_kind};
-use crate::drivers::report_io::{self, Coll, Dev, Hid, MAX_WAIT, device, find, products};
+use crate::drivers::hid::{self, Coll, Dev, Hid, MAX_WAIT, find, products};
 
 pub const VID: u16 = 0x1B1C;
 const RECEIVER_GRACE: Duration = Duration::from_secs(30 * 60);
@@ -66,7 +66,7 @@ fn poll_void(hid: &mut dyn Hid, c: &Coll) -> Option<Option<Device>> {
     if !d.write(&[0xC9, 0x64]) {
         return None;
     }
-    let r = report_io::read_until(hid, d.as_mut(), MAX_WAIT, |_| true)?;
+    let r = hid::read_until(d.as_mut(), MAX_WAIT, |_| true)?;
     let (pct, charging, connected) = parse_void(&r)?;
     if !connected {
         return Some(None); // receiver answered, headset off: the tracker keeps the last level
@@ -76,7 +76,7 @@ fn poll_void(hid: &mut dyn Hid, c: &Coll) -> Option<Option<Device>> {
     } else {
         &c.product
     };
-    let mut s = device(
+    let mut s = Device::new(
         format!("corsair:{:04X}", c.pid),
         name,
         Kind::Headset,
@@ -134,7 +134,7 @@ fn poll_compx(hid: &mut dyn Hid, c: &Coll, name: &str) -> Option<Option<Device>>
         answered = true;
         connected = r[6] != 0;
     }
-    let mut s = device(
+    let mut s = Device::new(
         format!("corsair:{:04X}", c.pid),
         name,
         Kind::Mouse,
@@ -242,14 +242,14 @@ impl Bragi {
 fn poll_bragi(hid: &mut dyn Hid, colls: &[Coll], vid: u16, pid: u16) -> Vec<Device> {
     let known = BRAGI_PIDS.contains(&pid);
     let candidates = find(colls, vid, pid, |c| {
-        let sizes = matches!(c.output, 64 | 65) && matches!(c.input, 64 | 65);
+        let sizes = matches!(c.out_len, 64 | 65) && matches!(c.in_len, 64 | 65);
         sizes && (c.page == 0xFF42 || (known && c.page >= 0xFF00) || (known && c.iface == 4))
     });
     for c in candidates {
         let Some(d) = hid.open(c) else { continue };
         let mut b = Bragi {
             d,
-            numbered: c.output == 64,
+            numbered: c.out_len == 64,
             mode: Mode::Unknown,
         };
         let mut out = Vec::new();
@@ -273,7 +273,7 @@ fn poll_bragi(hid: &mut dyn Hid, colls: &[Coll], vid: u16, pid: u16) -> Vec<Devi
             } else {
                 &c.product
             };
-            let mut s = device(
+            let mut s = Device::new(
                 format!("corsair:{pid:04X}:{target}"),
                 name,
                 guess_kind(name),
@@ -303,7 +303,7 @@ fn poll_bragi(hid: &mut dyn Hid, colls: &[Coll], vid: u16, pid: u16) -> Vec<Devi
                 s.kind = Kind::Headset;
             }
             if s.kind == Kind::Other {
-                s.kind = report_io::kind_from_colls(colls, vid, pid);
+                s.kind = hid::kind_from_colls(colls, vid, pid);
             }
             s.percent = Some(bragi_percent(level));
             if let Some(charge) = b.get(hid, target, 0x10) {
@@ -331,7 +331,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     for (vid, pid) in products(colls) {
         if VOID_PIDS.contains(&pid) {
             let void = find(colls, vid, pid, |c| {
-                (c.page == 0xFFC5 || c.page == 0xFF00) && c.output > 0
+                (c.page == 0xFFC5 || c.page == 0xFF00) && c.out_len > 0
             });
             for c in void {
                 if let Some(s) = poll_void(hid, c) {
@@ -343,7 +343,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
         }
         if let Some(name) = compx_name(pid) {
             let compx = find(colls, vid, pid, |c| {
-                c.page == 0xFF02 && c.usage == 0x0002 && c.output >= 17 && c.input >= 17
+                c.page == 0xFF02 && c.usage == 0x0002 && c.out_len >= 17 && c.in_len >= 17
             });
             for c in compx {
                 if let Some(s) = poll_compx(hid, c, name) {
@@ -359,24 +359,23 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    fn queue(replies: Vec<Vec<u8>>) -> (Fake, Rc<RefCell<Vec<Vec<u8>>>>) {
-        let writes = Rc::new(RefCell::new(Vec::new()));
+    fn queue(replies: Vec<Vec<u8>>) -> (Fake, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
         let w = writes.clone();
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        let f = Fake::new(move |_, op| match op {
+        let f = Fake::with(move |_, _, op| match op.clone() {
             Op::Write(data) => {
-                w.borrow_mut().push(data);
+                w.lock().unwrap().push(data);
                 Some(vec![])
             }
             Op::Read(_) => q.pop_front(),
@@ -399,13 +398,13 @@ mod tests {
             vid: VID,
             pid: 0x0A14,
             page: 0xFFC5,
-            output: 65,
+            out_len: 65,
             product: "CORSAIR VOID ELITE Wireless".into(),
             ..Default::default()
         };
         let (mut f, writes) = queue(vec![vec![0x64, 0, 0x80 | 55, 0, 2]]);
         let out = poll_with(&mut f, &[c]);
-        assert_eq!(writes.borrow()[0], [0xC9, 0x64]);
+        assert_eq!(writes.lock().unwrap()[0], [0xC9, 0x64]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].percent, Some(55));
         assert_eq!(out[0].kind, Kind::Headset);
@@ -429,8 +428,8 @@ mod tests {
             pid: 0x2B2A,
             page: 0xFF02,
             usage: 0x0002,
-            input: 17,
-            output: 17,
+            in_len: 17,
+            out_len: 17,
             ..Default::default()
         }
     }
@@ -443,8 +442,8 @@ mod tests {
             compx_reply(0x04, 81, 1, 4012),
         ]);
         let out = poll_with(&mut f, &[sabre()]);
-        assert_eq!(writes.borrow().len(), 2);
-        assert_eq!(writes.borrow()[1], compx_request(0x04));
+        assert_eq!(writes.lock().unwrap().len(), 2);
+        assert_eq!(writes.lock().unwrap()[1], compx_request(0x04));
         let s = &out[0];
         assert_eq!(
             (s.percent, s.charging, s.millivolts),
@@ -454,7 +453,7 @@ mod tests {
         // Mouse off: listed nowhere, battery not asked.
         let (mut f, writes) = queue(vec![compx_reply(0x03, 0, 0, 0)]);
         assert!(poll_with(&mut f, &[sabre()]).is_empty());
-        assert_eq!(writes.borrow().len(), 1);
+        assert_eq!(writes.lock().unwrap().len(), 1);
         // A bad checksum is not a reply.
         let mut bad = compx_reply(0x04, 50, 0, 0);
         bad[16] ^= 1;
@@ -475,14 +474,14 @@ mod tests {
             vid: VID,
             pid: 0x1BDC,
             page: 0xFF42,
-            input: 65,
-            output: 65,
+            in_len: 65,
+            out_len: 65,
             product: "CORSAIR SLIPSTREAM WIRELESS USB Receiver".into(),
             ..Default::default()
         };
         // Target 09: battery 735, product id 1B7E, charge state 1; 0A / 0B / plain framing silent.
         let mut last: Option<Vec<u8>> = None;
-        let mut fake = Fake::new(move |_, op| match op {
+        let mut fake = Fake::with(move |_, _, op| match op.clone() {
             Op::Write(w) => {
                 assert_eq!(w[0], 0x00, "unnumbered: report id 0 first");
                 last = Some(w);

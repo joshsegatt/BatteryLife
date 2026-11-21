@@ -16,9 +16,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{
-    BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, kind_of, ms_left, products,
-};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, kind_from_colls, left, pids};
 use crate::registry::Match;
 
 const VID: u16 = 0x1EA7;
@@ -29,7 +27,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub const REQUEST: [u8; 8] = [0xB5, 0x05, 0, 0, 0, 0, 0, 0];
@@ -52,33 +50,33 @@ fn query(d: &mut dyn Dev, end: Instant) -> Option<u8> {
     }
     let end = end.min(Instant::now() + Duration::from_millis(1200));
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return None;
         }
-        if let Some(p) = parse(&d.read(left.min(200))?) {
+        if let Some(p) = parse(&d.read(left.min(Duration::from_millis(200)))?) {
             return Some(p);
         }
     }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
-    for pid in products(colls, VID) {
+    for pid in pids(colls, VID) {
         if pid != 0x0066 && pid != 0x0064 {
             continue;
         }
         for c in find(colls, VID, pid, |c| {
             c.page == 0xFFB5 && c.usage == 1 && c.in_len == 8 && c.out_len == 8
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(pct) = io.open(c).and_then(|mut d| query(d.as_mut(), end)) else {
                 continue;
             };
-            let kind = match kind_of(colls, VID, pid) {
+            let kind = match kind_from_colls(colls, VID, pid) {
                 Kind::Other => Kind::Mouse,
                 k => k,
             };
@@ -100,7 +98,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{Fake, iface_coll as coll};
 
     fn dongle(pid: u16) -> Coll {
         coll(VID, pid, 0, 0xFFB5, 1, 8, 8, 0)
@@ -129,10 +127,8 @@ mod tests {
                 assert_eq!((out[0].percent, out[0].charging), (Some(level), false));
                 assert_eq!(out[0].key, format!("raigor:1EA7:{pid:04X}"));
                 assert_eq!(out[0].grace, Duration::from_secs(1800));
-                assert_eq!(
-                    f.s().sent,
-                    vec![(crate::drivers::hid_dev::fake::Sent::Write, REQUEST.to_vec())]
-                );
+                let st = f.s();
+                assert_eq!((st.sends(), st.writes()), (1, vec![REQUEST.to_vec()]));
             }
         }
         let (out, _) = poll_frames(dongle(0x66), vec![vec![0xB5, 0x67, 1, 2, 3, 4, 9, 42]]);
@@ -182,7 +178,7 @@ mod tests {
             }
             let (out, f) = poll_frames(c, vec![page(64)]);
             assert!(out.is_empty());
-            assert_eq!(f.s().opens, 0);
+            assert_eq!(f.s().opened.len(), 0);
         }
         let mut f = Fake::new();
         f.s().refuse_send = true;

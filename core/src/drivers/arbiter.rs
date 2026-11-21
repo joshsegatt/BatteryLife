@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left};
 use crate::registry::Match;
 
 const VID: u16 = 0x373E;
@@ -39,7 +39,7 @@ pub static MATCHES: &[Match] = &[Match {
 }];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[derive(Debug, PartialEq)]
@@ -72,13 +72,13 @@ pub fn decode(r: &[u8]) -> Option<Reply> {
     }
 }
 
-fn query(d: &mut dyn Dev, io: &mut dyn Io) -> Option<Reply> {
+fn query(d: &mut dyn Dev, io: &mut dyn Hid) -> Option<Reply> {
     for _ in 0..2 {
         if !d.set_feature(&request()) {
             return None;
         }
         for read in 0..3 {
-            io.sleep(if read == 0 { 100 } else { 60 });
+            io.sleep(Duration::from_millis(if read == 0 { 100 } else { 60 }));
             if let Some(rep) = decode(&d.get_feature(0)?) {
                 return Some(rep);
             }
@@ -91,7 +91,7 @@ fn is_channel(c: &Coll) -> bool {
     c.page == 0xFFFF && c.feat_len == 65
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     let mut claimed: Vec<u16> = Vec::new();
@@ -102,7 +102,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
         let mut cs = find(colls, VID, pid, is_channel);
         cs.sort_by_key(|c| c.usage != 0);
         for c in cs {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -149,7 +149,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
 
     fn akitsu(pid: u16) -> Coll {
         coll(VID, pid, 2, 0xFFFF, 0, 0, 0, 65)
@@ -169,10 +169,14 @@ mod tests {
 
     /// Fake that only accepts the read-only 0x83 status query and returns `replies` in order.
     fn device(replies: Vec<Vec<u8>>) -> Fake {
-        let f = Fake::with(|_, _, kind, q| {
-            assert_eq!(kind, Sent::Feature);
-            assert_eq!(q, request());
+        let f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetFeature(_)));
+                assert_eq!(q, request());
+            }
+            fake::queued(s, fc, op)
         });
+        f.s().pad_features = true;
         for r in replies {
             f.s().push_feature("", r);
         }
@@ -194,7 +198,7 @@ mod tests {
         assert_eq!((s.percent, s.charging, s.asleep), (Some(84), false, false));
         assert_eq!(s.grace, Duration::from_secs(1800));
         let st = f.s();
-        assert_eq!((st.sent.len(), st.feature_reads), (1, 1));
+        assert_eq!((st.sends(), st.feature_reads()), (1, 1));
     }
 
     #[test]
@@ -231,7 +235,7 @@ mod tests {
             ("arbiter:373E:0067", "USB cable")
         );
         assert_eq!(out[0].grace, Duration::from_secs(1800));
-        assert_eq!(f.s().opens, 1);
+        assert_eq!(f.s().opened.len(), 1);
     }
 
     #[test]
@@ -256,7 +260,7 @@ mod tests {
         let out = poll_with(&[akitsu(0x0067)], &mut f);
         assert!(out.is_empty() && start.elapsed() < Duration::from_secs(1));
         let st = f.s();
-        assert_eq!((st.sent.len(), st.feature_reads), (2, 6));
+        assert_eq!((st.sends(), st.feature_reads()), (2, 6));
     }
 
     #[test]
@@ -272,6 +276,6 @@ mod tests {
             &mut f,
         );
         assert!(out.is_empty());
-        assert_eq!(f.s().opens, 0);
+        assert_eq!(f.s().opened.len(), 0);
     }
 }

@@ -14,7 +14,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Hid, device, find, products};
+use crate::drivers::hid::{self, Coll, Hid, find, products};
 
 pub const VID_ARBITER_SHARED: u16 = 0x373E;
 /// LAMZU's ids on 373E (Maya X, Maya X V2); the rest of 373E is Arbiter Studio's.
@@ -110,7 +110,7 @@ pub fn parse(r: &[u8]) -> Option<(bool, u8)> {
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let mut out = Vec::new();
     for (vid, pid) in products(colls) {
-        for c in find(colls, vid, pid, |c| c.feature == 65) {
+        for c in find(colls, vid, pid, |c| c.feat_len == 65) {
             let Some(mut d) = hid.open(c) else { continue };
             if !d.set_feature(&request()) {
                 continue;
@@ -124,7 +124,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
             if pct == 0 && !cable {
                 break;
             }
-            let mut s = device(
+            let mut s = Device::new(
                 format!("lamzu:{vid:04X}:{pid:04X}"),
                 model_name(vid, pid).unwrap_or("LAMZU wireless mouse"),
                 Kind::Mouse,
@@ -147,13 +147,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
 
     fn reply(chg: u8, pct: u8) -> Vec<u8> {
         let mut r = vec![0u8; 65];
@@ -166,12 +166,12 @@ mod tests {
     }
 
     fn fake(r: Vec<u8>) -> Fake {
-        Fake::new(move |_, op| match op {
+        Fake::with(move |_, _, op| match op.clone() {
             Op::SetFeature(w) => {
                 assert_eq!(w, request());
                 Some(vec![])
             }
-            Op::GetFeature(0) => Some(r.clone()),
+            Op::GetFeature(0, _) => Some(r.clone()),
             _ => None,
         })
     }
@@ -180,7 +180,7 @@ mod tests {
         Coll {
             vid,
             pid,
-            feature: 65,
+            feat_len: 65,
             ..Default::default()
         }
     }

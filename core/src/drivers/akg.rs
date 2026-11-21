@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x0ECB;
 pub const PID: u16 = 0x20D9;
@@ -36,28 +36,30 @@ pub fn find_level(b: &[u8]) -> Option<u8> {
     level
 }
 
-pub fn read_level(io: &mut dyn Io, out_len: usize) -> Option<u8> {
+pub fn read_level(io: &mut dyn Dev, out_len: usize) -> Option<u8> {
     let mut req = vec![0u8; out_len.max(10)];
     req[..10].copy_from_slice(&[0x06, 0x07, 0x80, 0x05, 0x5A, 0x03, 0x00, 0xD6, 0x0C, 0x00]);
     if !io.write(&req) {
         return None;
     }
     // The reply shows up within ~100 ms while the headset is on.
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     while Instant::now() < end {
-        io.sleep(15);
-        if let Some(l) = io.get_input_report(0x07).and_then(|r| find_level(&r)) {
+        io.sleep(Duration::from_millis(15));
+        if let Some(l) = io.get_input(0x07).and_then(|r| find_level(&r)) {
             return Some(l);
         }
     }
     None
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     for c in find(colls, VID, PID, |c| {
         c.iface == 3 && c.page == 0xFF13 && c.usage == 0x0001 && c.in_len == 62 && c.out_len == 62
     }) {
-        let Some(level) = open(c).and_then(|mut io| read_level(io.as_mut(), c.out_len.into()))
+        let Some(level) = hid
+            .open(c)
+            .and_then(|mut io| read_level(io.as_mut(), c.out_len.into()))
         else {
             continue;
         };
@@ -69,14 +71,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     /// 05 5D 05 00 D6 0C 00 00 32 = 50 %, as checked against the AKG Headphones app.
     fn report(valid: u8, tail: &[u8]) -> Vec<u8> {
@@ -103,14 +104,16 @@ mod tests {
         c.iface = 3;
         let f = Fake::new();
         let frame = [0x05, 0x5D, 0x05, 0x00, 0xD6, 0x0C, 0x00, 0x00, 0x32];
-        f.s().inputs = vec![report(0, &[]), report(9, &frame)].into();
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        f.s().input_reports.insert(
+            String::new(),
+            vec![report(0, &[]), report(9, &frame)].into(),
+        );
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].key, "akg:20D9");
         assert_eq!(out[0].percent, Some(50));
-        assert_eq!(f.s().writes[0].len(), 62);
+        assert_eq!(f.s().writes()[0].len(), 62);
         assert_eq!(
-            f.s().writes[0][..10],
+            f.s().writes()[0][..10],
             [6, 7, 0x80, 5, 0x5A, 3, 0, 0xD6, 0x0C, 0]
         );
     }

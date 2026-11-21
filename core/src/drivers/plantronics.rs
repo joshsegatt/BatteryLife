@@ -13,7 +13,7 @@
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x047F;
 pub const PIDS: &[u16] = &[0x02EE, 0x02F7];
@@ -63,9 +63,9 @@ pub fn battery(r: &[u8]) -> Option<(u8, bool)> {
 }
 
 /// Waits for the reply to (op, grp, item), skipping events; false after 16 reports or a silence.
-fn wait(io: &mut dyn Io, op: u8, grp: u8, item: u8, addr: u8) -> Option<Vec<u8>> {
+fn wait(io: &mut dyn Dev, op: u8, grp: u8, item: u8, addr: u8) -> Option<Vec<u8>> {
     for _ in 0..16 {
-        let r = io.read(hid_io::MAX_REPLY_MS).filter(|r| !r.is_empty())?;
+        let r = io.read(hid::MAX_WAIT).filter(|r| !r.is_empty())?;
         if is_reply(&r, op, grp, item, addr) {
             return Some(r);
         }
@@ -73,7 +73,7 @@ fn wait(io: &mut dyn Io, op: u8, grp: u8, item: u8, addr: u8) -> Option<Vec<u8>>
     None
 }
 
-fn read_battery(io: &mut dyn Io) -> Option<(u8, bool)> {
+fn read_battery(io: &mut dyn Dev) -> Option<(u8, bool)> {
     io.flush();
     io.write(&[0x06, 0x01]); // the adapter's attach nudge; harmless if it is already attached
     io.write(&frame(OP_HELLO, GRP_HELLO, ITEM_HELLO, ADDR_DONGLE));
@@ -95,11 +95,11 @@ fn read_battery(io: &mut dyn Io) -> Option<(u8, bool)> {
     )?)
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
     for &pid in PIDS {
         for c in find(colls, VID, pid, |c| c.page == 0xFFA2 && c.usage == 0x0003) {
-            let Some(mut io) = open(c) else { continue };
+            let Some(mut io) = hid.open(c) else { continue };
             let Some((pct, charging)) = read_battery(io.as_mut()) else {
                 continue;
             };
@@ -119,14 +119,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     fn answer(op: u8, grp: u8, item: u8, addr: u8, value: &[u8]) -> Vec<u8> {
         let mut r = frame(op, grp, item, addr).to_vec();
@@ -156,8 +155,7 @@ mod tests {
 
     #[test]
     fn attach_hello_and_battery() {
-        let f = Fake::new();
-        f.replies(|w| {
+        let f = Fake::replies(|w| {
             if w.len() < 11 {
                 return vec![];
             }
@@ -171,19 +169,17 @@ mod tests {
                 _ => vec![],
             }
         });
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, 0x02EE, 0xFFA2, 0x0003, 64, 64);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].key, "plantronics:02EE");
         assert_eq!((out[0].percent, out[0].charging), (Some(90), false));
-        assert_eq!(f.s().writes[0], vec![0x06, 0x01]);
+        assert_eq!(f.s().writes()[0], vec![0x06, 0x01]);
     }
 
     #[test]
     fn headset_not_paired_lists_nothing() {
         let f = Fake::new();
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, 0x02F7, 0xFFA2, 0x0003, 64, 64);
-        assert!(poll_colls(&[c], &mut *f.opener(&opened)).is_empty());
+        assert!(poll_colls(&[c], &mut f.clone()).is_empty());
     }
 }

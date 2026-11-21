@@ -15,9 +15,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x1A2C;
 const DONGLE: u16 = 0x8FFF;
@@ -56,7 +54,7 @@ pub fn parse(r: &[u8]) -> Option<Result<Status, ()>> {
     })
 }
 
-fn query(port: &mut dyn Port) -> Option<Status> {
+fn query(port: &mut dyn Dev) -> Option<Status> {
     let mut req = vec![0u8; 65];
     req[1..6].copy_from_slice(&[0xAA, 0x55, 0xCC, 0x33, 0x0E]);
     port.flush();
@@ -87,7 +85,7 @@ fn keyboard_name(c: &Coll, cable_pid: u16) -> String {
     }
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut products: Vec<u16> = colls
         .iter()
         .filter(|c| c.vid == VID && PIDS.contains(&c.pid))
@@ -114,7 +112,9 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
                 && c.in_len == 65
                 && c.out_len == 65
         }) {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             match query(port.as_mut()) {
                 None => continue,
                 // Keyboard offline on this link: BatteryHub lists it as disconnected (hidden).
@@ -138,14 +138,16 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, at, coll};
+    use crate::drivers::hid::fake::{Fake, at, coll, path_responder, script};
 
+    /// After each accepted send, queues `respond(path, data)`; a flush drops queued replies.
+    /// A flush drops queued replies, as on the device.
     fn collection(pid: u16, path: &str) -> Coll {
         let mut c = at(coll(VID, pid, 0xFF02, 0x0002, 65), path);
         c.iface = 0;
@@ -165,17 +167,15 @@ mod tests {
     }
 
     /// Replies per collection path.
-    fn by_path(table: Vec<(&'static str, Vec<Vec<u8>>)>) -> fake::Shared {
-        let s = fake::script();
+    fn by_path(table: Vec<(&'static str, Vec<Vec<u8>>)>) -> Fake {
         let mut table = table;
-        s.borrow_mut().respond = Some(Box::new(move |path, _| {
+        path_responder(move |path, _| {
             table
                 .iter_mut()
                 .find(|(p, _)| *p == path)
                 .map(|(_, r)| std::mem::take(r))
                 .unwrap_or_default()
-        }));
-        s
+        })
     }
 
     #[test]
@@ -184,8 +184,8 @@ mod tests {
             "dongle",
             vec![vec![0x01, 0x02, 0x03], reply(0x60, 0x01)],
         )]);
-        let out = poll_with(&[collection(DONGLE, "dongle")], &mut fake::opener(&s));
-        let w = &s.borrow().writes;
+        let out = poll_with(&[collection(DONGLE, "dongle")], &mut s.clone());
+        let w = &s.s().writes();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].len(), 65);
         assert_eq!(w[0][..6], [0x00, 0xAA, 0x55, 0xCC, 0x33, 0x0E]);
@@ -205,7 +205,7 @@ mod tests {
     fn dongle_wins_and_cable_names_the_model() {
         let s = by_path(vec![("dongle", vec![reply(0x58, 0x01)])]);
         let colls = [collection(X98_CABLE, "cable"), collection(DONGLE, "dongle")];
-        let out = poll_with(&colls, &mut fake::opener(&s));
+        let out = poll_with(&colls, &mut s.clone());
         assert_eq!(out.len(), 1);
         assert_eq!(
             (out[0].name.as_str(), out[0].percent),
@@ -221,7 +221,7 @@ mod tests {
             ("cable", vec![reply(0x64, 0x03)]),
         ]);
         let colls = [collection(DONGLE, "dongle"), collection(X98_CABLE, "cable")];
-        let out = poll_with(&colls, &mut fake::opener(&s));
+        let out = poll_with(&colls, &mut s.clone());
         assert_eq!(
             (out[0].name.as_str(), out[0].percent),
             ("Attack Shark X98", Some(100))
@@ -230,14 +230,14 @@ mod tests {
 
         // Offline with no cable answering: nothing listed, no invented level.
         let s = by_path(vec![("dongle", vec![reply(0, 0)])]);
-        assert!(poll_with(&[collection(DONGLE, "dongle")], &mut fake::opener(&s)).is_empty());
+        assert!(poll_with(&[collection(DONGLE, "dongle")], &mut s.clone()).is_empty());
     }
 
     #[test]
     fn malformed_and_filtered() {
         for r in [reply(101, 2), reply(50, 4)] {
             let s = by_path(vec![("dongle", vec![r])]);
-            assert!(poll_with(&[collection(DONGLE, "dongle")], &mut fake::opener(&s)).is_empty());
+            assert!(poll_with(&[collection(DONGLE, "dongle")], &mut s.clone()).is_empty());
         }
         let mut wrong_iface = collection(DONGLE, "x");
         wrong_iface.iface = 3;
@@ -251,8 +251,8 @@ mod tests {
             at(coll(VID, DONGLE, 0xFF01, 0xFF01, 4), "wrong-page"),
             wrong_len,
         ];
-        let s = fake::script();
-        assert!(poll_with(&colls, &mut fake::opener(&s)).is_empty());
-        assert!(s.borrow().opened.is_empty());
+        let s = script();
+        assert!(poll_with(&colls, &mut s.clone()).is_empty());
+        assert!(s.s().opened.is_empty());
     }
 }

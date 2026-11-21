@@ -6,13 +6,11 @@
 //! Ported from BatteryHub (src/drivers/akko.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0.
 
-use std::time::Instant;
-
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
 use crate::drivers::cherry::ff1c_status;
-use crate::drivers::hidport::{BUDGET, Coll, Opener, RECEIVER, RECEIVER_GRACE, colls, hid_opener};
+use crate::drivers::hid::{self, Coll, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x38EE;
 pub const PIDS: &[u16] = &[0x000C, 0x000F];
@@ -26,7 +24,7 @@ fn is_status_reply(r: &[u8]) -> bool {
     r.len() >= 10 && r[0] == 0x04 && r[3] == 0x1A && r[8] <= 100
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     let mut out = Vec::new();
     for (pid, name, key) in MODELS {
         for c in colls.iter().filter(|c| {
@@ -36,7 +34,9 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
                 && c.in_len == 64
                 && c.out_len == 64
         }) {
-            let Some(mut port) = open(c) else { continue };
+            let Some(mut port) = hid.open(c) else {
+                continue;
+            };
             let Some(r) = ff1c_status(port.as_mut(), is_status_reply) else {
                 continue;
             };
@@ -52,15 +52,16 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut hid_opener(api, Instant::now() + BUDGET))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::drivers::cherry::ff1c_status_query;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{coll, per_write, script};
 
+    /// A flush drops queued replies, as on the device.
     fn reply(percent: u8, charging: u8) -> Vec<u8> {
         let mut r = vec![0u8; 64];
         r[0] = 0x04;
@@ -73,9 +74,9 @@ mod tests {
     #[test]
     fn reads_both_receivers() {
         for (pid, key) in [(0x000C, "akko:38ee:000c"), (0x000F, "akko:38ee:000f")] {
-            let s = fake::per_write(vec![vec![reply(81, 1)]]);
-            let out = poll_with(&[coll(VID, pid, 0xFF1C, 0x0092, 64)], &mut fake::opener(&s));
-            assert_eq!(s.borrow().writes, vec![ff1c_status_query()]);
+            let s = per_write(vec![vec![reply(81, 1)]]);
+            let out = poll_with(&[coll(VID, pid, 0xFF1C, 0x0092, 64)], &mut s.clone());
+            assert_eq!(s.s().writes(), vec![ff1c_status_query()]);
             assert_eq!(out.len(), 1);
             assert_eq!(
                 (out[0].key.as_str(), out[0].percent, out[0].charging),
@@ -87,20 +88,11 @@ mod tests {
 
     #[test]
     fn out_of_range_level_is_not_a_reply() {
-        let s = fake::per_write(vec![vec![reply(101, 0)], vec![reply(40, 0)]]);
-        let out = poll_with(
-            &[coll(VID, 0x000C, 0xFF1C, 0x0092, 64)],
-            &mut fake::opener(&s),
-        );
+        let s = per_write(vec![vec![reply(101, 0)], vec![reply(40, 0)]]);
+        let out = poll_with(&[coll(VID, 0x000C, 0xFF1C, 0x0092, 64)], &mut s.clone());
         assert_eq!(out[0].percent, Some(40));
-        let s = fake::script();
-        assert!(
-            poll_with(
-                &[coll(VID, 0x000C, 0xFF1C, 0x0092, 9)],
-                &mut fake::opener(&s)
-            )
-            .is_empty()
-        );
-        assert!(s.borrow().opened.is_empty());
+        let s = script();
+        assert!(poll_with(&[coll(VID, 0x000C, 0xFF1C, 0x0092, 9)], &mut s.clone()).is_empty());
+        assert!(s.s().opened.is_empty());
     }
 }

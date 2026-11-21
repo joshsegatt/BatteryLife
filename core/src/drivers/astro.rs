@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, Outcome, find, stable_key};
+use crate::drivers::hid::{self, Coll, Dev, Hid, Outcome, find, stable_key};
 
 pub const VID_LOGITECH: u16 = 0x046D;
 pub const LOGITECH_PIDS: &[u16] = &[0x0B0B, 0x0B1C];
@@ -96,18 +96,21 @@ fn legacy_frame(f: Framing, cmd: u8, payload: &[u8]) -> Vec<u8> {
     v
 }
 
-fn query_once(io: &mut dyn Io, f: Framing, cmd: u8, payload: &[u8]) -> QResult {
+fn query_once(io: &mut dyn Dev, f: Framing, cmd: u8, payload: &[u8]) -> QResult {
     io.flush();
     if !io.write(&legacy_frame(f, cmd, payload)) {
         return QResult::WriteFailed;
     }
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     loop {
         let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
         if left == 0 {
             return QResult::NoReply;
         }
-        let Some(r) = io.read(left).filter(|r| r.len() >= 4) else {
+        let Some(r) = io
+            .read(Duration::from_millis(left))
+            .filter(|r| r.len() >= 4)
+        else {
             return QResult::NoReply;
         };
         match (r[0], r[1]) {
@@ -119,7 +122,7 @@ fn query_once(io: &mut dyn Io, f: Framing, cmd: u8, payload: &[u8]) -> QResult {
     }
 }
 
-fn query_legacy(io: &mut dyn Io, st: &mut State, pid: u16, cmd: u8, payload: &[u8]) -> QResult {
+fn query_legacy(io: &mut dyn Dev, st: &mut State, pid: u16, cmd: u8, payload: &[u8]) -> QResult {
     let known = st.framing(pid);
     let order = if known == Some(Framing::NoReportId) {
         [Framing::NoReportId, Framing::ReportId02]
@@ -149,7 +152,7 @@ pub fn gen3_battery(r: &[u8]) -> Option<u8> {
     (data[12] == 0x02 && data[13] == 0x04 && (data[14] & 0x7F) <= 100).then_some(data[14])
 }
 
-fn poll_legacy(c: &Coll, name: &str, io: Option<&mut dyn Io>, st: &mut State) -> Outcome {
+fn poll_legacy(c: &Coll, name: &str, io: Option<&mut dyn Dev>, st: &mut State) -> Outcome {
     let mut d = Device::new(
         format!("astro:{:04X}", c.pid),
         name,
@@ -221,7 +224,7 @@ pub fn a50x_reply(r: &[u8]) -> Option<(u8, bool)> {
     ok.then(|| (r[6], r[8] != 0))
 }
 
-fn poll_a50x(colls: &[Coll], open: &mut Open<'_>, out: &mut Vec<Device>) {
+fn poll_a50x(colls: &[Coll], hid: &mut dyn Hid, out: &mut Vec<Device>) {
     let mut done: Vec<u16> = Vec::new();
     for c in colls {
         if c.vid != VID_LOGITECH
@@ -234,7 +237,7 @@ fn poll_a50x(colls: &[Coll], open: &mut Open<'_>, out: &mut Vec<Device>) {
         {
             continue;
         }
-        let Some(mut io) = open(c) else { continue };
+        let Some(mut io) = hid.open(c) else { continue };
         io.flush();
         // No payload: read battery only; never change audio or headset settings.
         let mut req = [0u8; 64];
@@ -242,13 +245,15 @@ fn poll_a50x(colls: &[Coll], open: &mut Open<'_>, out: &mut Vec<Device>) {
         if !io.write(&req) {
             continue;
         }
-        let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+        let end = Instant::now() + hid::MAX_WAIT;
         for _ in 0..8 {
             let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
             if left == 0 {
                 break;
             }
-            let Some(r) = io.read(left) else { break };
+            let Some(r) = io.read(Duration::from_millis(left)) else {
+                break;
+            };
             let Some((pct, charging)) = a50x_reply(&r) else {
                 continue;
             };
@@ -268,15 +273,15 @@ fn poll_a50x(colls: &[Coll], open: &mut Open<'_>, out: &mut Vec<Device>) {
     }
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid, st: &mut State) -> Vec<Device> {
     let mut out = Vec::new();
-    poll_a50x(colls, open, &mut out);
+    poll_a50x(colls, hid, &mut out);
     for &(pid, name) in LEGACY_MODELS {
         for c in find(colls, VID_ASTRO, pid, |c| {
             is_legacy_vendor(c) || (c.page == 0 && (c.iface == 6 || c.iface == -1))
         }) {
-            let mut io = open(c);
-            let io = io.as_mut().map(|b| b.as_mut() as &mut dyn Io);
+            let mut io = hid.open(c);
+            let io = io.as_mut().map(|b| b.as_mut() as &mut dyn Dev);
             if poll_legacy(c, name, io, st).settle(&mut out) {
                 break;
             }
@@ -288,14 +293,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>, st: &mut State) -> Vec<De
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(State::default);
-    hid_io::run(api, infos, |colls, open| poll_colls(colls, open, st))
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid, st))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::{Fake, Op, queued};
 
     fn a50x(pid: u16) -> Coll {
         Coll::new(VID_LOGITECH, pid, 0xFF32, 0x74, 64, 64)
@@ -306,9 +310,8 @@ mod tests {
     fn run(colls: &[Coll], replies: Vec<Vec<u8>>, st: &mut State) -> (Vec<Device>, Fake, usize) {
         let f = Fake::new();
         f.queue(replies);
-        let opened = RefCell::new(Vec::new());
-        let out = poll_colls(colls, &mut *f.opener(&opened), st);
-        let n = opened.borrow().len();
+        let out = poll_colls(colls, &mut f.clone(), st);
+        let n = f.s().opened.len();
         (out, f, n)
     }
 
@@ -322,7 +325,7 @@ mod tests {
         );
         let mut expected = vec![0u8; 64];
         expected[..6].copy_from_slice(&[2, 12, 3, 0, 6, 12]);
-        assert_eq!(f.s().writes, vec![expected]);
+        assert_eq!(f.s().writes(), vec![expected]);
 
         let (out, _, _) = run(&[a50x(0x0B0B)], vec![reply(0, 1)], &mut State::default());
         assert_eq!((out[0].percent, out[0].charging), (Some(0), true));
@@ -392,30 +395,32 @@ mod tests {
             &mut State::default(),
         );
         assert_eq!((out[0].percent, out[0].charging), (Some(72), false));
-        assert_eq!(f.s().writes, vec![vec![2, 0x54], vec![2, 0x7C]]);
+        assert_eq!(f.s().writes(), vec![vec![2, 0x54], vec![2, 0x7C]]);
     }
 
     #[test]
     fn legacy_framing_without_report_id_is_remembered() {
         let mut st = State::default();
         let run_no_id = |replies: Vec<Vec<u8>>, st: &mut State| {
-            let f = Fake::new();
-            f.s().write_filter = Some(|w| w[0] != 0x02);
+            // Writes with report id 02 fail.
+            let f = Fake::with(|s, c, op| match op {
+                Op::Write(w) if w[0] == 0x02 => None,
+                _ => queued(s, c, op),
+            });
             f.queue(replies);
-            let opened = RefCell::new(Vec::new());
-            let out = poll_colls(&[legacy(0x0015)], &mut *f.opener(&opened), st);
+            let out = poll_colls(&[legacy(0x0015)], &mut f.clone(), st);
             (out, f)
         };
         let (out, f) = run_no_id(vec![vec![2, 2, 1, 0x03], vec![2, 2, 1, 0x80 | 90]], &mut st);
         assert_eq!((out[0].percent, out[0].charging), (Some(90), true));
         assert_eq!(
-            f.s().writes,
+            f.s().writes(),
             vec![vec![2, 0x54], vec![0, 2, 0x54], vec![0, 2, 0x7C]]
         );
         let (out, f) = run_no_id(vec![vec![2, 2, 1, 0x02], vec![2, 2, 1, 40]], &mut st);
         assert_eq!(out[0].percent, Some(40));
-        assert_eq!(f.s().writes.len(), 2);
-        assert_eq!(f.s().writes[0][0], 0);
+        assert_eq!(f.s().writes().len(), 2);
+        assert_eq!(f.s().writes()[0][0], 0);
     }
 
     #[test]
@@ -485,7 +490,7 @@ mod tests {
             &mut State::default(),
         );
         assert_eq!((out[0].percent, out[0].charging), (Some(63), true));
-        assert_eq!(f.s().writes.last().unwrap(), &vec![2, 0x72, 1, 1]);
+        assert_eq!(f.s().writes().last().unwrap(), &vec![2, 0x72, 1, 1]);
         // Wrong field marker: still listed as linked, without a level.
         let mut bad = ui;
         bad[16] = 3;
@@ -509,8 +514,9 @@ mod tests {
         locked.page = 0;
         locked.in_len = 0;
         locked.out_len = 0;
-        let mut open = |_: &Coll| -> Option<Box<dyn Io>> { None };
-        let out = poll_colls(&[locked], &mut open, &mut st);
+        let mut hid = Fake::new();
+        hid.s().refuse_open = true;
+        let out = poll_colls(&[locked], &mut hid, &mut st);
         assert_eq!(out[0].percent, Some(55));
     }
 }

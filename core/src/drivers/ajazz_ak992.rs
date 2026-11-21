@@ -14,15 +14,13 @@ use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
 use crate::drivers::atk_keyboard::{Reply, evision_reply};
-use crate::drivers::hidport::{
-    BUDGET, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x320F;
 const PID: u16 = 0x50C3;
 pub const PIDS: &[u16] = &[PID];
 
-fn read_battery(port: &mut dyn Port, seq: u16) -> Option<(u8, bool)> {
+fn read_battery(port: &mut dyn Dev, seq: u16) -> Option<(u8, bool)> {
     let [lo, hi] = seq.to_le_bytes();
     port.flush();
     if !port.write(&[0x04, lo, hi, 0x1A]) {
@@ -41,7 +39,7 @@ fn read_battery(port: &mut dyn Port, seq: u16) -> Option<(u8, bool)> {
     }
 }
 
-pub fn poll_with(colls: &[Coll], open: &mut Opener, seq: u16) -> Vec<Device> {
+pub fn poll_with(colls: &[Coll], hid: &mut dyn Hid, seq: u16) -> Vec<Device> {
     for c in colls.iter().filter(|c| {
         c.is(VID, PID)
             && c.iface == 1
@@ -51,7 +49,9 @@ pub fn poll_with(colls: &[Coll], open: &mut Opener, seq: u16) -> Vec<Device> {
             && c.out_len == 64
             && c.feat_len == 0
     }) {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         let Some((percent, charging)) = read_battery(port.as_mut(), seq) else {
             continue;
         };
@@ -74,18 +74,15 @@ pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let seq = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(1, |d| d.as_millis() as u16);
-    poll_with(
-        &colls(infos),
-        &mut hid_opener(api, Instant::now() + BUDGET),
-        seq,
-    )
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid, seq))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{coll, per_write, script};
 
+    /// A flush drops queued replies, as on the device.
     fn receiver() -> Coll {
         let mut c = coll(VID, PID, 0xFF1C, 0x0092, 64);
         c.iface = 1;
@@ -103,13 +100,13 @@ mod tests {
 
     #[test]
     fn reads_level_and_skips_other_reports() {
-        let s = fake::per_write(vec![vec![
+        let s = per_write(vec![vec![
             reply(0x1233, 50, 0),
             reply(0x1234, 101, 0),
             reply(0x1234, 86, 1),
         ]]);
-        let out = poll_with(&[receiver()], &mut fake::opener(&s), 0x1234);
-        assert_eq!(s.borrow().writes, vec![vec![0x04, 0x34, 0x12, 0x1A]]);
+        let out = poll_with(&[receiver()], &mut s.clone(), 0x1234);
+        assert_eq!(s.s().writes(), vec![vec![0x04, 0x34, 0x12, 0x1A]]);
         let d = &out[0];
         assert_eq!(
             (d.percent, d.charging, d.kind),
@@ -120,13 +117,13 @@ mod tests {
 
     #[test]
     fn silent_receiver_and_other_collections() {
-        assert!(poll_with(&[receiver()], &mut fake::opener(&fake::script()), 7).is_empty());
+        assert!(poll_with(&[receiver()], &mut script(), 7).is_empty());
         let mut with_feature = receiver();
         with_feature.feat_len = 64;
         let mut other_iface = receiver();
         other_iface.iface = 0;
-        let s = fake::script();
-        assert!(poll_with(&[with_feature, other_iface], &mut fake::opener(&s), 7).is_empty());
-        assert!(s.borrow().opened.is_empty());
+        let s = script();
+        assert!(poll_with(&[with_feature, other_iface], &mut s.clone(), 7).is_empty());
+        assert!(s.s().opened.is_empty());
     }
 }

@@ -24,9 +24,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hidport::{
-    BUDGET, CABLE, Coll, Opener, Port, RECEIVER, RECEIVER_GRACE, colls, hid_opener,
-};
+use crate::drivers::hid::{self, CABLE, Coll, Dev, Hid, RECEIVER, RECEIVER_GRACE};
 
 pub const VID: u16 = 0x36B0;
 const DONGLE: u16 = 0x3002;
@@ -54,12 +52,12 @@ fn is_raw_hid(c: &Coll) -> bool {
 }
 
 /// Sends a request and waits for the reply starting with `echo` (skipping status pushes).
-fn ask(port: &mut dyn Port, req: &[u8], echo: &[u8], ms: u64) -> Option<Vec<u8>> {
+fn ask(port: &mut dyn Dev, req: &[u8], echo: &[u8], ms: u64) -> Option<Vec<u8>> {
     port.flush();
     if !port.write(req) {
         return None;
     }
-    crate::drivers::hidport::wait_for(port, Duration::from_millis(ms), |r| {
+    hid::read_until(port, Duration::from_millis(ms), |r| {
         r.len() >= echo.len() + 6 && r.starts_with(echo)
     })
 }
@@ -77,7 +75,7 @@ fn pmo_ok(r: &Option<Vec<u8>>) -> bool {
 }
 
 /// PMO Hub session: (percent or None, keyboard pid the dongle reported as paired).
-fn pmo_query(port: &mut dyn Port, out_len: u16) -> (Option<u8>, Option<u16>) {
+fn pmo_query(port: &mut dyn Dev, out_len: u16) -> (Option<u8>, Option<u16>) {
     let payload = usize::from(out_len) - 1; // 32 or 64
     let len = (payload - 8) as u8; // 0x18 or 0x38, as pmohub.cn uses
     let start_echo = [0xAA, 0x10, 0x00, 0x00];
@@ -113,7 +111,7 @@ fn pmo_query(port: &mut dyn Port, out_len: u16) -> (Option<u8>, Option<u16>) {
 }
 
 /// VIA custom value 7: the level (1..100), or None.
-fn via_query(port: &mut dyn Port, out_len: u16) -> Option<u8> {
+fn via_query(port: &mut dyn Dev, out_len: u16) -> Option<u8> {
     let mut req = vec![0u8; usize::from(out_len)];
     req[1..4].copy_from_slice(&[0x08, 0x00, 0x07]);
     for _ in 0..2 {
@@ -202,7 +200,7 @@ fn make(key_pid: u16, name: String, via: &'static str, level: u8) -> Device {
 
 fn poll_cable(
     colls: &[Coll],
-    open: &mut Opener,
+    hid: &mut dyn Hid,
     states: &mut HashMap<u16, State>,
     now: Instant,
     pid: u16,
@@ -220,7 +218,9 @@ fn poll_cable(
         return None;
     }
     for c in found {
-        let Some(mut port) = open(c) else { continue };
+        let Some(mut port) = hid.open(c) else {
+            continue;
+        };
         let (Some(level), _) = pmo_query(port.as_mut(), c.out_len) else {
             continue;
         };
@@ -238,7 +238,7 @@ fn poll_cable(
 
 fn poll_dongle(
     colls: &[Coll],
-    open: &mut Opener,
+    hid: &mut dyn Hid,
     states: &mut HashMap<u16, State>,
     now: Instant,
     cable_answered: bool,
@@ -255,7 +255,7 @@ fn poll_dongle(
     if (cable_answered && st.proto != Proto::Via) || st.waiting(now) {
         return None;
     }
-    let mut port = open(c)?;
+    let mut port = hid.open(c)?;
     let mut order = [Proto::Pmo, Proto::Via];
     if st.proto == Proto::Via || (st.proto == Proto::Unknown && c.product.contains("URX")) {
         order.swap(0, 1);
@@ -286,16 +286,16 @@ fn poll_dongle(
 
 pub fn poll_with(
     colls: &[Coll],
-    open: &mut Opener,
+    hid: &mut dyn Hid,
     states: &mut HashMap<u16, State>,
     now: Instant,
 ) -> Vec<Device> {
     let mut out = Vec::new();
     for (pid, _) in PMO_BOARDS {
-        out.extend(poll_cable(colls, open, states, now, pid));
+        out.extend(poll_cable(colls, hid, states, now, pid));
     }
     let cable_answered = !out.is_empty();
-    out.extend(poll_dongle(colls, open, states, now, cable_answered));
+    out.extend(poll_dongle(colls, hid, states, now, cable_answered));
     out
 }
 
@@ -305,19 +305,15 @@ pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
     let states = guard.get_or_insert_with(HashMap::new);
     let now = Instant::now();
-    poll_with(
-        &colls(infos),
-        &mut hid_opener(api, now + BUDGET),
-        states,
-        now,
-    )
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid, states, now))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hidport::fake::{self, coll};
+    use crate::drivers::hid::fake::{Fake, coll, responder, script};
 
+    /// A flush drops queued replies, as on the device.
     fn raw(pid: u16, len: u16, product: &str) -> Coll {
         let mut c = coll(VID, pid, 0xFF60, 0x61, len);
         c.iface = 1;
@@ -326,8 +322,8 @@ mod tests {
     }
 
     /// A PMO keyboard: answers START, GET_BATTERY and STOP; `paired` goes into the START reply.
-    fn pmo(level: u8, paired: Option<u16>) -> fake::Shared {
-        fake::responder(move |w| {
+    fn pmo(level: u8, paired: Option<u16>) -> Fake {
+        responder(move |w| {
             if w.get(1) != Some(&0xAA) {
                 return vec![]; // the PMO firmware ignores VIA frames
             }
@@ -348,8 +344,8 @@ mod tests {
     }
 
     /// A VIA keyboard: answers custom value 7 with `level`, FF to anything else.
-    fn via(level: u8) -> fake::Shared {
-        fake::responder(move |w| {
+    fn via(level: u8) -> Fake {
+        responder(move |w| {
             let mut r = vec![0u8; 32];
             if w[1..4] == [0x08, 0x00, 0x07] {
                 r[..4].copy_from_slice(&[0x08, 0x00, 0x07, level]);
@@ -372,7 +368,7 @@ mod tests {
         let mut states = HashMap::new();
         let out = poll_with(
             &[raw(DONGLE, 33, "Wireless 2.4G Dongle")],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut states,
             Instant::now(),
         );
@@ -381,7 +377,7 @@ mod tests {
             (d.key.as_str(), d.name.as_str(), d.percent),
             ("via:36B0:3009", "WAVE 75", Some(78))
         );
-        let w = &s.borrow().writes;
+        let w = &s.s().writes();
         assert_eq!(
             w.iter().map(|w| w[2]).collect::<Vec<_>>(),
             [0x10, 0x30, 0x11]
@@ -397,15 +393,15 @@ mod tests {
             raw(0x3009, 65, "WAVE 75"),
             raw(DONGLE, 33, "Wireless 2.4G Dongle"),
         ];
-        let out = poll_with(&colls, &mut fake::opener(&s), &mut states, Instant::now());
+        let out = poll_with(&colls, &mut s.clone(), &mut states, Instant::now());
         assert_eq!(out.len(), 1);
         assert_eq!(
             (out[0].key.as_str(), out[0].via.as_str()),
             ("via:36B0:3009", CABLE)
         );
         // START length on the cable is 0x38 (64-byte payload).
-        assert_eq!(s.borrow().writes[0][5], 0x38);
-        assert_eq!(s.borrow().opened.len(), 1);
+        assert_eq!(s.s().writes()[0][5], 0x38);
+        assert_eq!(s.s().opened.len(), 1);
     }
 
     #[test]
@@ -414,7 +410,7 @@ mod tests {
         let mut states = HashMap::new();
         let out = poll_with(
             &[raw(DONGLE, 33, "URX Core75 Wireless")],
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut states,
             Instant::now(),
         );
@@ -423,35 +419,35 @@ mod tests {
             ("URX Core75", Some(55))
         );
         assert_eq!(out[0].key, "via:36B0:3002");
-        assert_eq!(s.borrow().writes[0][1..4], [0x08, 0x00, 0x07]);
+        assert_eq!(s.s().writes()[0][1..4], [0x08, 0x00, 0x07]);
         assert_eq!(states[&DONGLE].proto, Proto::Via);
     }
 
     #[test]
     fn silent_dongle_backs_off() {
-        let s = fake::script();
+        let s = script();
         let mut states = HashMap::new();
         let now = Instant::now();
         let colls = [raw(DONGLE, 33, "Wireless 2.4G Dongle")];
-        assert!(poll_with(&colls, &mut fake::opener(&s), &mut states, now).is_empty());
-        let sent = s.borrow().writes.len();
+        assert!(poll_with(&colls, &mut s.clone(), &mut states, now).is_empty());
+        let sent = s.s().writes().len();
         assert!(
             poll_with(
                 &colls,
-                &mut fake::opener(&s),
+                &mut s.clone(),
                 &mut states,
                 now + Duration::from_secs(10)
             )
             .is_empty()
         );
-        assert_eq!(s.borrow().writes.len(), sent, "inside the 30 s back-off");
+        assert_eq!(s.s().writes().len(), sent, "inside the 30 s back-off");
         poll_with(
             &colls,
-            &mut fake::opener(&s),
+            &mut s.clone(),
             &mut states,
             now + Duration::from_secs(31),
         );
-        assert!(s.borrow().writes.len() > sent);
+        assert!(s.s().writes().len() > sent);
     }
 
     #[test]

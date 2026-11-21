@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_io::{self, Coll, Io, Open, find};
+use crate::drivers::hid::{self, Coll, Dev, Hid, find};
 
 pub const VID: u16 = 0x054C;
 pub const PIDS: &[u16] = &[0x0FA8, 0x0EBF, 0x0EC2];
@@ -91,19 +91,21 @@ fn next_tid() -> u16 {
 
 /// Battery reply payload. None when the write failed or nothing answered (which the buds dongle
 /// does with both buds in the case).
-fn get_battery(io: &mut dyn Io, min_payload: usize) -> Option<Vec<u8>> {
+fn get_battery(io: &mut dyn Dev, min_payload: usize) -> Option<Vec<u8>> {
     let tid = next_tid();
     io.flush();
     if !io.write(&request(tid)) {
         return None;
     }
-    let end = Instant::now() + Duration::from_millis(hid_io::MAX_REPLY_MS);
+    let end = Instant::now() + hid::MAX_WAIT;
     loop {
         let left = end.saturating_duration_since(Instant::now()).as_millis() as u64;
         if left == 0 {
             return None;
         }
-        let r = io.read(left).filter(|r| r.len() >= 15)?;
+        let r = io
+            .read(Duration::from_millis(left))
+            .filter(|r| r.len() >= 15)?;
         if let Some(e) = parse_event(&r)
             && e.id == 0x04
             && e.tid == tid
@@ -144,7 +146,7 @@ pub fn device(pid: u16, name: &str, buds: bool, p: &[u8]) -> Option<Device> {
     Some(d)
 }
 
-pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
+pub fn poll_colls(colls: &[Coll], hid: &mut dyn Hid) -> Vec<Device> {
     // min payload: headsets [charging][percent]; buds 3x [status][percent].
     const MODELS: &[(u16, &str, bool, usize)] = &[
         (0x0FA8, "Sony INZONE H9 II", false, 2),
@@ -154,7 +156,7 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
     let mut out = Vec::new();
     for &(pid, name, buds, min_payload) in MODELS {
         for c in find(colls, VID, pid, |c| c.page == 0xFF04 && c.out_len >= 64) {
-            let Some(mut io) = open(c) else { continue };
+            let Some(mut io) = hid.open(c) else { continue };
             // No reply from the buds dongle means both buds are in the case: not listed.
             if let Some(p) = get_battery(io.as_mut(), min_payload) {
                 out.extend(device(pid, name, buds, &p));
@@ -166,14 +168,13 @@ pub fn poll_colls(colls: &[Coll], open: &mut Open<'_>) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    hid_io::run(api, infos, poll_colls)
+    hid::run(api, infos, |hid, colls| poll_colls(colls, hid))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_io::fake::Fake;
-    use std::cell::RefCell;
+    use crate::drivers::hid::fake::Fake;
 
     /// Battery event for `tid` with `payload`, type RET.
     fn event(tid: u16, payload: &[u8]) -> Vec<u8> {
@@ -233,14 +234,12 @@ mod tests {
 
     #[test]
     fn poll_answers_the_current_transaction() {
-        let f = Fake::new();
-        f.replies(|w| {
+        let f = Fake::replies(|w| {
             let tid = u16::from_le_bytes([w[11], w[12]]);
             vec![event(tid.wrapping_sub(1), &[0, 10]), event(tid, &[0, 42])]
         });
-        let opened = RefCell::new(Vec::new());
         let c = Coll::new(VID, 0x0EBF, 0xFF04, 1, 64, 64);
-        let out = poll_colls(&[c], &mut *f.opener(&opened));
+        let out = poll_colls(&[c], &mut f.clone());
         assert_eq!(out[0].name, "Sony INZONE H5");
         assert_eq!(out[0].percent, Some(42));
     }

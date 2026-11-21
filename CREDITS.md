@@ -13,7 +13,7 @@ or C#, and each ported file names its source in its header comment.
 | `core/src/drivers/bluetooth.rs` | `src/drivers/generic.cpp` (PollBluetooth) |
 | `core/src/drivers/generic_hid.rs` | `src/drivers/generic.cpp` (PollGenericHid) |
 | `core/src/drivers/xbox.rs` | `src/drivers/xinput.cpp` |
-| `core/src/drivers/hid_io.rs` | report conventions of `src/hid.h` / `src/hid.cpp` (`HidDev`) |
+| `core/src/drivers/hid.rs` | HID layer of `src/hid.h` / `src/hid.cpp` (`HidColl`, `HidDev`: report lengths, read / write framing) |
 | `core/src/drivers/hyperx.rs` | `src/drivers/hyperx.cpp` |
 | `core/src/drivers/steelseries_elite.rs` | `src/drivers/steelseries_elite.cpp` |
 | `core/src/drivers/razer_headset.rs` | `src/drivers/razer_headset.cpp` |
@@ -35,7 +35,6 @@ or C#, and each ported file names its source in its header comment.
 | `core/src/drivers/alienware.rs` | `src/drivers/alienware.cpp` |
 | `core/src/drivers/pressplay_icarus.rs` | `src/drivers/pressplay_icarus.cpp` |
 | `app/BatteryLife.Logic/AlertRules.cs` | alert semantics of `src/alert_rules.h` |
-| `core/src/drivers/report_io.rs` | HID conventions of `src/hid.h` (report lengths, read / write framing) |
 | `core/src/drivers/razer.rs` | `src/drivers/razer.cpp` |
 | `core/src/drivers/steelseries.rs` | `src/drivers/steelseries.cpp` |
 | `core/src/drivers/corsair.rs` | `src/drivers/corsair.cpp` |
@@ -51,7 +50,6 @@ or C#, and each ported file names its source in its header comment.
 | `core/src/drivers/endgame.rs` | `src/drivers/endgame.cpp` |
 | `core/src/drivers/endgame_we.rs` | `src/drivers/endgame_we.cpp` |
 | `core/src/drivers/zowie.rs` | `src/drivers/zowie.cpp` |
-| `core/src/drivers/hidport.rs` | HID conventions of `src/hid.h` (`HidColl`, `HidDev`) |
 | `core/src/drivers/keychron.rs` | `src/drivers/keychron.cpp` |
 | `core/src/drivers/royal_kludge.rs` | `src/drivers/royal_kludge.cpp` |
 | `core/src/drivers/nuphy.rs` | `src/drivers/nuphy.cpp` |
@@ -70,7 +68,6 @@ or C#, and each ported file names its source in its header comment.
 | `core/src/drivers/redragon_evision.rs` | `src/drivers/redragon_evision.cpp` |
 | `core/src/drivers/dareu.rs` | `src/drivers/dareu.cpp` |
 | `core/src/drivers/darkrim.rs` | `src/drivers/darkrim.cpp` |
-| `core/src/drivers/hid_dev.rs` | HID conventions of `src/hid.h` / `src/hid.cpp` (HidColl, HidDev) |
 | `core/src/drivers/rawm.rs` | `src/drivers/rawm.cpp`, `src/drivers/rawm_protocol.h` |
 | `core/src/drivers/sprime.rs` | `src/drivers/sprime.cpp` |
 | `core/src/drivers/darmoshark.rs` | `src/drivers/darmoshark.cpp` (PollDarmoshark, PollDarmosharkNrf) |

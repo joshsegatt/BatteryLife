@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, kind_of, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, kind_from_colls, left};
 use crate::registry::Match;
 
 const REDRAGON: [u16; 3] = [0xF55D, 0xF5D5, 0xF55E];
@@ -61,7 +61,7 @@ pub static MATCHES: &[Match] = &[
 ];
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    poll_with(&colls(infos), &mut HidIo(api))
+    hid::run(api, infos, |hid, colls| poll_with(colls, hid))
 }
 
 pub fn checksum(b: &[u8]) -> u8 {
@@ -142,8 +142,8 @@ fn query(d: &mut dyn Dev, cmd: u8, end: Instant) -> Option<Vec<u8>> {
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return None;
         }
         let r = d.read(left).filter(|r| r.len() >= 17)?;
@@ -170,7 +170,7 @@ fn read_one(d: &mut dyn Dev, c: &Coll, colls: &[Coll], end: Instant) -> Outcome 
     let mut s = Device::new(
         format!("kysona:{}:{}", hex4(vid), hex4(key_pid(vid, pid))),
         clean_name(&c.product, vid, pid),
-        match kind_of(colls, vid, pid) {
+        match kind_from_colls(colls, vid, pid) {
             Kind::Other => Kind::Mouse,
             k => k,
         },
@@ -203,7 +203,7 @@ fn read_one(d: &mut dyn Dev, c: &Coll, colls: &[Coll], end: Instant) -> Outcome 
     }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out: Vec<Device> = Vec::new();
     for m in MATCHES {
@@ -215,7 +215,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
             // The battery channel is FF02:0002 where it exists.
             cs.sort_by_key(|c| !(c.page == 0xFF02 && c.usage == 2));
             for c in cs {
-                if ms_left(end) == 0 {
+                if left(end).is_zero() {
                     return out;
                 }
                 let Some(mut d) = io.open(c) else { continue };
@@ -244,7 +244,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, coll};
+    use crate::drivers::hid::fake::{self, Fake, iface_coll as coll};
 
     fn reply(cmd: u8, b6: u8, b7: u8) -> Vec<u8> {
         let mut r = vec![0u8; 17];
@@ -261,16 +261,19 @@ mod tests {
     }
 
     fn device(online: u8, battery: Option<(u8, u8)>) -> Fake {
-        Fake::with(move |s, _, _, q| {
-            assert!(q == request(3) || q == request(4));
-            match q[1] {
-                3 => s.push_input("", reply(3, online, 0)),
-                _ => {
-                    if let Some((p, c)) = battery {
-                        s.push_input("", reply(4, p, c));
+        Fake::with(move |s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(q == request(3) || q == request(4));
+                match q[1] {
+                    3 => s.push_input("", reply(3, online, 0)),
+                    _ => {
+                        if let Some((p, c)) = battery {
+                            s.push_input("", reply(4, p, c));
+                        }
                     }
                 }
             }
+            fake::queued(s, fc, op)
         })
     }
 
@@ -319,7 +322,7 @@ mod tests {
         let mut f = device(0, Some((76, 0)));
         assert!(poll_with(&[vxe(0xF58A)], &mut f).is_empty());
         assert_eq!(
-            f.s().sent.len(),
+            f.s().sends(),
             1,
             "no battery query when the dongle says offline"
         );

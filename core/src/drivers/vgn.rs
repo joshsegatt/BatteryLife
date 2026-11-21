@@ -12,7 +12,7 @@ use std::time::Duration;
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::report_io::{self, Coll, Hid, device, find};
+use crate::drivers::hid::{self, Coll, Hid, find};
 
 pub const VID: u16 = 0x372E;
 pub const PID_ZHOU_WIRELESS: u16 = 0x10BB;
@@ -37,12 +37,12 @@ fn query(hid: &mut dyn Hid, c: &Coll) -> Option<u8> {
     if !d.set_output(&[REPORT_ID, READ_BATTERY, 0x01]) {
         return None;
     }
-    let first = d.read(report_io::MAX_WAIT)?;
+    let first = d.read(hid::MAX_WAIT)?;
     if let Some(p) = parse(&first) {
         return Some(p);
     }
     // The battery frame can arrive behind other notifications.
-    let r = report_io::read_until(hid, d.as_mut(), Duration::from_millis(300), |r| {
+    let r = hid::read_until(d.as_mut(), Duration::from_millis(300), |r| {
         parse(r).is_some()
     })?;
     parse(&r)
@@ -50,7 +50,7 @@ fn query(hid: &mut dyn Hid, c: &Coll) -> Option<u8> {
 
 fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
     let control = find(colls, VID, PID_ZHOU_WIRELESS, |c| {
-        c.page == 0x000C && c.usage == 0x0001 && c.output >= 63 && c.input >= 3
+        c.page == 0x000C && c.usage == 0x0001 && c.out_len >= 63 && c.in_len >= 3
     });
     for c in control {
         let Some(pct) = query(hid, c) else { continue };
@@ -59,7 +59,7 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
         } else {
             &c.product
         };
-        let mut s = device("vgn:zhou", name, Kind::Headset, "2.4 GHz receiver");
+        let mut s = Device::new("vgn:zhou", name, Kind::Headset, "2.4 GHz receiver");
         s.percent = Some(pct);
         // The dongle answers while the headset is awake; keep the last value otherwise.
         s.grace = Duration::from_secs(30 * 60);
@@ -69,13 +69,13 @@ fn poll_with(hid: &mut dyn Hid, colls: &[Coll]) -> Vec<Device> {
 }
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
-    report_io::run(api, infos, poll_with)
+    hid::run(api, infos, poll_with)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::report_io::fake::{Fake, Op};
+    use crate::drivers::hid::fake::{Fake, Op};
     use std::collections::VecDeque;
 
     /// The control collection of the ZHOUTING dongle.
@@ -85,8 +85,8 @@ mod tests {
             pid,
             page,
             usage,
-            output,
-            input,
+            out_len: output,
+            in_len: input,
             path: "vgn-control".into(),
             product: "VGN ZHOU".into(),
             ..Default::default()
@@ -109,7 +109,7 @@ mod tests {
 
     fn fake(replies: Vec<Vec<u8>>) -> Fake {
         let mut q: VecDeque<Vec<u8>> = replies.into();
-        Fake::new(move |c, op| match op {
+        Fake::with(move |_, c, op| match op.clone() {
             Op::SetOutput(w) => {
                 assert_eq!(c.path, "vgn-control");
                 assert_eq!(w, [0x55, 0x65, 0x01]);
@@ -190,7 +190,7 @@ mod tests {
         ] {
             let mut f = fake(vec![]);
             assert!(poll_with(&mut f, &[c]).is_empty());
-            assert_eq!(f.opens.get(), 0);
+            assert_eq!(f.s().opened.len(), 0);
         }
     }
 }

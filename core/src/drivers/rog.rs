@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi};
 
 use crate::device::{Device, Kind};
-use crate::drivers::hid_dev::{BUDGET, Coll, Dev, HidIo, Io, colls, find, hex4, ms_left};
+use crate::drivers::hid::{self, BUDGET, Coll, Dev, Hid, find, hex4, left};
 use crate::registry::Match;
 
 const VID: u16 = 0x0B05;
@@ -179,11 +179,9 @@ static AWAKE: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
 
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     let mut awake = AWAKE.lock().unwrap_or_else(|e| e.into_inner());
-    poll_with(
-        &colls(infos),
-        &mut HidIo(api),
-        awake.get_or_insert_with(HashSet::new),
-    )
+    hid::run(api, infos, |hid, colls| {
+        poll_with(colls, hid, awake.get_or_insert_with(HashSet::new))
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -210,8 +208,8 @@ fn query(d: &mut dyn Dev, rid: u8, cmd: u8, sub: u8, end: Instant) -> Option<Rep
     }
     let end = end.min(Instant::now() + Duration::from_millis(500));
     loop {
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             return None;
         }
         let mut r = d.read(left).filter(|r| r.len() >= 11)?;
@@ -278,7 +276,7 @@ fn on_omni(c: &Coll, col: &str) -> bool {
 }
 
 /// Omni Receiver: asks which devices are paired, then reads each on its own channel.
-fn poll_omni(colls: &[Coll], io: &mut dyn Io, out: &mut Vec<Device>, end: Instant) {
+fn poll_omni(colls: &[Coll], io: &mut dyn Hid, out: &mut Vec<Device>, end: Instant) {
     let Some(list) = find(colls, VID, OMNI, |c| on_omni(c, "col01"))
         .into_iter()
         .next()
@@ -300,7 +298,7 @@ fn poll_omni(colls: &[Coll], io: &mut dyn Io, out: &mut Vec<Device>, end: Instan
         // Only the Omni-channel entry of that model.
         if let Some(m) = MODELS.iter().find(|m| m.pid == pid && m.report_id != 0) {
             for c in find(colls, VID, OMNI, |c| on_omni(c, m.col.unwrap_or(""))) {
-                if ms_left(end) == 0 {
+                if left(end).is_zero() {
                     return;
                 }
                 let sub = if m.keyboard { 0x01 } else { 0x07 };
@@ -323,12 +321,12 @@ fn pelta_query(d: &mut dyn Dev, cmd: u8, end: Instant) -> Option<Reply> {
     let end = end.min(Instant::now() + Duration::from_millis(500));
     let req = [0xCC, 0x12, cmd];
     let mut next = if d.set_output(&req) {
-        d.read(ms_left(end).max(1))
+        d.read(left(end).max(Duration::from_millis(1)))
     } else {
         None
     };
-    if next.is_none() && ms_left(end) > 0 && d.write(&req) {
-        next = d.read(ms_left(end).max(1));
+    if next.is_none() && !left(end).is_zero() && d.write(&req) {
+        next = d.read(left(end).max(Duration::from_millis(1)));
     }
     while let Some(r) = next.take().filter(|r| r.len() >= 8) {
         if r[0] == 0xCC && r[1] == 0xFF && r[2] == 0xAA {
@@ -342,8 +340,8 @@ fn pelta_query(d: &mut dyn Dev, cmd: u8, end: Instant) -> Option<Reply> {
                 return Some(Reply::Ok(r));
             }
         }
-        let left = ms_left(end);
-        if left == 0 {
+        let left = left(end);
+        if left.is_zero() {
             break;
         }
         next = d.read(left);
@@ -368,10 +366,10 @@ fn headset(pid: u16, name: &str) -> Device {
     s
 }
 
-fn poll_pelta(colls: &[Coll], io: &mut dyn Io, out: &mut Vec<Device>, end: Instant) {
+fn poll_pelta(colls: &[Coll], io: &mut dyn Hid, out: &mut Vec<Device>, end: Instant) {
     for (pid, name) in HEADSETS {
         for c in headset_colls(colls, pid) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return;
             }
             let Some(mut d) = io.open(c) else { continue };
@@ -404,9 +402,9 @@ pub fn cetra_levels(r: &[u8]) -> (Option<u8>, Option<u8>) {
     (level(5), level(6))
 }
 
-fn poll_cetra(colls: &[Coll], io: &mut dyn Io, out: &mut Vec<Device>, end: Instant) {
+fn poll_cetra(colls: &[Coll], io: &mut dyn Hid, out: &mut Vec<Device>, end: Instant) {
     for c in headset_colls(colls, CETRA_OPEN) {
-        if ms_left(end) == 0 {
+        if left(end).is_zero() {
             return;
         }
         let Some(mut d) = io.open(c) else { continue };
@@ -427,7 +425,7 @@ fn poll_cetra(colls: &[Coll], io: &mut dyn Io, out: &mut Vec<Device>, end: Insta
     }
 }
 
-fn poll_with(colls: &[Coll], io: &mut dyn Io, awake: &mut HashSet<u16>) -> Vec<Device> {
+fn poll_with(colls: &[Coll], io: &mut dyn Hid, awake: &mut HashSet<u16>) -> Vec<Device> {
     let end = Instant::now() + BUDGET;
     let mut out = Vec::new();
     poll_pelta(colls, io, &mut out, end);
@@ -444,7 +442,7 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, awake: &mut HashSet<u16>) -> Vec<D
                 && (m.iface < 0 || c.iface == m.iface)
                 && m.col.is_none_or(|t| c.path_str().contains(t))
         }) {
-            if ms_left(end) == 0 {
+            if left(end).is_zero() {
                 return out;
             }
             let sub = if m.keyboard { 0x01 } else { 0x07 };
@@ -474,7 +472,12 @@ fn poll_with(colls: &[Coll], io: &mut dyn Io, awake: &mut HashSet<u16>) -> Vec<D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drivers::hid_dev::fake::{Fake, Sent, coll, with_path};
+    use crate::drivers::hid::fake::{self, Fake, Op, iface_coll as coll};
+
+    fn with_path(mut c: Coll, path: &str) -> Coll {
+        c.path = path.into();
+        c
+    }
 
     fn mouse_reply(level: u8, charging: u8) -> Vec<u8> {
         // Unnumbered: the report as read, without the id slot.
@@ -523,12 +526,16 @@ mod tests {
 
     #[test]
     fn wired_mouse_query_restores_the_id_slot() {
-        let mut f = Fake::with(|s, _, kind, q| {
-            assert_eq!((kind, q), (Sent::Write, &[0u8, 0x12, 0x07][..]));
-            let mut other = mouse_reply(10, 0);
-            other[1] = 0x01; // a keyboard reply is not this answer
-            s.push_input("", other);
-            s.push_input("", mouse_reply(57, 0));
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::Write(_)));
+                assert_eq!(q, &[0u8, 0x12, 0x07][..]);
+                let mut other = mouse_reply(10, 0);
+                other[1] = 0x01; // a keyboard reply is not this answer
+                s.push_input("", other);
+                s.push_input("", mouse_reply(57, 0));
+            }
+            fake::queued(s, fc, op)
         });
         let out = poll_with(
             &[coll(VID, 0x1A18, 0, 0xFF01, 1, 64, 64, 0)],
@@ -548,13 +555,16 @@ mod tests {
             coll(VID, 0x1AD0, 2, 0xFF02, 1, 64, 64, 0),
             r"\\?\hid#vid_0b05&pid_1ad0&mi_02&col03#x",
         );
-        let mut f = Fake::with(|s, _, _, q| {
-            assert_eq!(q, [3, 0x12, 0x07]);
-            let mut r = vec![0u8; 64];
-            r[0] = 3;
-            r[1] = 0xFF;
-            r[2] = 0xAA;
-            s.push_input("", r);
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert_eq!(q, [3, 0x12, 0x07]);
+                let mut r = vec![0u8; 64];
+                r[0] = 3;
+                r[1] = 0xFF;
+                r[2] = 0xAA;
+                s.push_input("", r);
+            }
+            fake::queued(s, fc, op)
         });
         let mut awake = HashSet::new();
         assert!(poll_with(std::slice::from_ref(&c), &mut f, &mut awake).is_empty());
@@ -565,16 +575,19 @@ mod tests {
 
     #[test]
     fn pelta_reads_level_then_charging() {
-        let mut f = Fake::with(|s, _, kind, q| {
-            assert_eq!(kind, Sent::Output);
-            let mut r = vec![0u8; 64];
-            r[..3].copy_from_slice(&[0xCC, 0x12, q[2]]);
-            if q[2] == 0x07 {
-                r[6] = 73;
-            } else {
-                r[5] = 1;
+        let mut f = Fake::with(|s, fc, op| {
+            if let Some(q) = op.sent() {
+                assert!(matches!(op, Op::SetOutput(_)));
+                let mut r = vec![0u8; 64];
+                r[..3].copy_from_slice(&[0xCC, 0x12, q[2]]);
+                if q[2] == 0x07 {
+                    r[6] = 73;
+                } else {
+                    r[5] = 1;
+                }
+                s.push_input("", r);
             }
-            s.push_input("", r);
+            fake::queued(s, fc, op)
         });
         let out = poll_with(
             &[coll(VID, 0x1B84, 3, 0xFF00, 1, 64, 64, 0)],
