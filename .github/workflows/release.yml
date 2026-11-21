@@ -1,0 +1,60 @@
+name: release
+
+# Pushing a tag like v0.1.0 builds a portable zip that runs on any Windows 11 x64 PC (the .NET
+# runtime and the Windows App SDK ship inside it) and publishes it as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      # Same pinned actions as ci.yml.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
+        with:
+          global-json-file: app/global.json
+
+      - name: Build the reader
+        working-directory: core
+        run: cargo build --release --locked
+
+      - name: Test logic
+        working-directory: app
+        run: dotnet test BatteryLife.Logic.Tests
+
+      # "dotnet build", not "dotnet publish": publish leaves out the compiled XAML (.xbf) and the
+      # resource index (.pri) of this unpackaged WinUI app, and the published exe crashes on start.
+      - name: Build the app with the .NET runtime inside
+        working-directory: app
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          dotnet build BatteryLife.App -c Release -r win-x64 -p:Platform=x64 -p:SelfContained=true -p:DebugType=none -p:Version=$version -warnaserror
+
+      - name: Smoke test (app starts and stays up)
+        working-directory: app
+        shell: pwsh
+        run: ./tools/smoke.ps1 (Get-ChildItem BatteryLife.App/bin/x64/Release -Recurse -Filter BatteryLife.exe | Select-Object -First 1).FullName
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          $out = (Get-ChildItem app/BatteryLife.App/bin/x64/Release -Recurse -Filter BatteryLife.exe | Select-Object -First 1).DirectoryName
+          Copy-Item LICENSE, README.md $out
+          $zip = "BatteryLife-$env:GITHUB_REF_NAME-win-x64.zip"
+          Compress-Archive -Path "$out\*" -DestinationPath $zip
+          (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" | Set-Content "$zip.sha256" -Encoding ascii
+          "ZIP=$zip" >> $env:GITHUB_ENV
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" "$env:ZIP" "$env:ZIP.sha256" --title "BatteryLife $env:GITHUB_REF_NAME" --generate-notes

@@ -64,14 +64,18 @@ BatteryHub is the project whose device research made BatteryLife possible, and i
 | Device coverage | 77 brand drivers ported, most not yet hardware-verified | About 100 drivers, many hardware-verified |
 | Crash isolation | Drivers run in a separate process, in parallel, each with a deadline | One process, drivers polled in sequence |
 | Memory safety | Device parsing in Rust | C++ |
-| Size and memory | Core about 1 MB of RAM; the WinUI app about 90 MB and 160 MB installed | About 2 MB of RAM, about 350 KB |
+| Size and memory | Core about 1 MB of RAM; the WinUI app about 90 MB of RAM, a 95 MB download (240 MB unzipped, .NET included) | About 2 MB of RAM, about 350 KB |
 | Languages | 2 | 19 |
 | Signed auto-updates | Not yet | Yes |
 | Linux | No | Experimental |
 
 ## Install
 
-There is no packaged release yet. To build it yourself:
+1. Download `BatteryLife-<version>-win-x64.zip` from the [latest release](https://github.com/joshsegatt/BatteryLife/releases/latest). It runs on Windows 11 x64 with nothing else to install: the .NET runtime ships inside.
+2. Extract it to a folder that will stay put, for example `%LOCALAPPDATA%\BatteryLife` (the "Start with Windows" option points to this folder).
+3. Run `BatteryLife.exe`. The release is not code-signed yet, so Windows SmartScreen may say *Windows protected your PC*: click **More info**, then **Run anyway**. You can check the download against the `.sha256` file next to it in the release.
+
+### Build from source
 
 1. Install [Rust](https://rustup.rs/) and the [.NET 10 SDK](https://dotnet.microsoft.com/download).
 2. Build the device reader:
@@ -111,7 +115,7 @@ Design decisions live in [`PRODUCT.md`](PRODUCT.md) and [`DESIGN.md`](DESIGN.md)
 
 ## Help wanted
 
-- **Test with your hardware:** build the reader (see [Install](#install), step 2), run `core/target/release/batterylife-core.exe --list` and tell us what it shows. This is the most valuable contribution right now.
+- **Test with your hardware:** extract the release zip (see [Install](#install)), run `batterylife-core.exe --list` from its folder in a terminal and tell us what it shows. This is the most valuable contribution right now.
 - **Report a device we don't read:** [open an issue](https://github.com/joshsegatt/BatteryLife/issues/new) with the output of `batterylife-core --list` and the device name.
 - **Translate:** all text lives in [`app/BatteryLife.Logic/Text.cs`](app/BatteryLife.Logic/Text.cs).
 - **Code:** read [`CLAUDE.md`](CLAUDE.md) for the layout and the checks CI runs. Open a pull request with one change at a time.
@@ -135,6 +139,6 @@ BatteryLife is free software under the [GNU General Public License v3.0](LICENSE
 
 ### Em português
 
-O BatteryLife mostra, na bandeja do Windows 11, qual aparelho sem fio vai acabar primeiro e quanto tempo ele ainda tem. A faixa fica preta e calma quando está tudo bem e amarela só quando algo precisa carregar. Ele lê mouses, headsets, teclados, controles e o celular (pelo Phone Link), e nunca muda configuração nenhuma do aparelho. Achou um aparelho que não aparece? [Abra uma issue](https://github.com/joshsegatt/BatteryLife/issues/new). Quer apoiar? [Doe pelo PayPal](https://www.paypal.com/donate/?business=segatt22%40gmail.com&item_name=BatteryLife): as doações compram aparelhos para testar os drivers.
+O BatteryLife mostra, na bandeja do Windows 11, qual aparelho sem fio vai acabar primeiro e quanto tempo ele ainda tem. A faixa fica preta e calma quando está tudo bem e amarela só quando algo precisa carregar. Ele lê mouses, headsets, teclados, controles e o celular (pelo Phone Link), e nunca muda configuração nenhuma do aparelho. Para instalar, baixe o zip da [última versão](https://github.com/joshsegatt/BatteryLife/releases/latest), extraia numa pasta fixa e abra o `BatteryLife.exe` (se o Windows avisar, clique em "Mais informações" e "Executar assim mesmo": o app ainda não tem assinatura digital). Achou um aparelho que não aparece? [Abra uma issue](https://github.com/joshsegatt/BatteryLife/issues/new). Quer apoiar? [Doe pelo PayPal](https://www.paypal.com/donate/?business=segatt22%40gmail.com&item_name=BatteryLife): as doações compram aparelhos para testar os drivers.
 
 <img src="docs/images/panel-action.png" alt="Painel do BatteryLife em português, com a faixa amarela 'Carregue o headset antes de jogar' e '2 h 10 min'" width="380">
