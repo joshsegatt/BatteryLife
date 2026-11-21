@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 
 use crate::device::{Device, Kind, guess_kind, interpolate};
+use crate::drivers::hid_util::physical_key;
 
 pub const VID: u16 = 0x046D;
 /// Our software id; replies to other apps (G HUB, Options+) carry theirs and are ignored.
@@ -411,21 +412,6 @@ impl HidLink {
     }
 }
 
-/// Groups HID collections of one physical interface: drops "&colNN" and the last "&NNNN" of the path.
-fn physical_key(path: &str) -> String {
-    let p = path.to_lowercase();
-    let parts: Vec<&str> = p.splitn(4, '#').collect();
-    if parts.len() < 4 {
-        return String::new();
-    }
-    let hw = match parts[1].find("&col") {
-        Some(i) => format!("{}{}", &parts[1][..i], parts[1].get(i + 6..).unwrap_or("")),
-        None => parts[1].to_string(),
-    };
-    let inst = parts[2].rsplit_once('&').map_or(parts[2], |(a, _)| a);
-    format!("{hw}#{inst}")
-}
-
 /// Polls the Logitech HID collections the dispatcher assigned to this driver.
 pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     struct Group {
@@ -638,13 +624,5 @@ mod tests {
     #[test]
     fn empty_receiver_reports_nothing() {
         assert!(poll_link(&mut Fake(HashMap::new()), 0xC54D, "", false, "").is_empty());
-    }
-
-    #[test]
-    fn physical_key_merges_collections() {
-        let a = r"\\?\HID#VID_046D&PID_C54D&MI_02&Col01#7&a2e4456&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        let b = r"\\?\HID#VID_046D&PID_C54D&MI_02&Col02#7&a2e4456&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        assert_eq!(physical_key(a), physical_key(b));
-        assert_eq!(physical_key(a), "vid_046d&pid_c54d&mi_02#7&a2e4456&0");
     }
 }

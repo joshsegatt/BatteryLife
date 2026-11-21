@@ -3,6 +3,7 @@
 
 pub mod bluetooth;
 pub mod generic_hid;
+pub mod hid_util;
 pub mod logitech;
 pub mod phonelink;
 pub mod xbox;
