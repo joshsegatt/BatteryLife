@@ -16,6 +16,7 @@ pub fn poll_all() -> Vec<Device> {
         Ok(api) => registry::poll(
             Arc::new(api),
             registry::HID_DRIVERS,
+            registry::CHAINS,
             registry::FALLBACK,
             registry::SOURCES,
             registry::DRIVER_TIMEOUT,

@@ -2,8 +2,10 @@
 //!
 //! Each HID driver declares which devices it handles. A device goes to the most specific match: an
 //! exact vendor + product id beats a whole-vendor match, so drivers that share a vendor id need no
-//! hand-kept ordering. Drivers then run in parallel, each with a deadline, so one slow or stuck
-//! device cannot hold up the others.
+//! hand-kept ordering. A product no driver claims exactly can also have a chain of drivers to try
+//! after its whole-vendor driver (`CHAINS`): vendors whose mice speak one of several protocols.
+//! Drivers then run in parallel, each with a deadline, so one slow or stuck device cannot hold up
+//! the others; a chain moves on round by round.
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -38,6 +40,45 @@ pub struct HidDriver {
     /// Polls only the HID collections assigned to this driver. Blocking, read-only.
     pub poll: fn(&HidApi, &[DeviceInfo]) -> Vec<Device>,
 }
+
+/// Drivers tried, in order, on the products of `vid` that no driver claims exactly, after the
+/// whole-vendor driver of `vid` (if any), as BatteryHub tries its protocols in turn.
+pub struct Chain {
+    pub vid: u16,
+    /// Driver names, in the order they are asked.
+    pub drivers: &'static [&'static str],
+}
+
+/// G-Wolves and Hitscan mice speak either Glorious' protocol or Kysona's (glorious.cpp then
+/// kysona.cpp); Kysona's protocol also runs on vendor ids shared with AULA, Chimera, ATK, Pulsar and
+/// HECATE headsets, whose own products are claimed exactly (kysona.rs skips the ones it must never
+/// send mouse frames to).
+pub static CHAINS: &[Chain] = &[
+    Chain {
+        vid: 0x3770,
+        drivers: &["glorious", "kysona"],
+    },
+    Chain {
+        vid: 0x33E4,
+        drivers: &["glorious", "kysona"],
+    },
+    Chain {
+        vid: 0x3554,
+        drivers: &["kysona"],
+    },
+    Chain {
+        vid: 0x373B,
+        drivers: &["kysona"],
+    },
+    Chain {
+        vid: 0x3710,
+        drivers: &["kysona"],
+    },
+    Chain {
+        vid: 0x35BB,
+        drivers: &["kysona"],
+    },
+];
 
 /// A source that needs no HID access (files, OS APIs).
 pub struct Source {
@@ -695,77 +736,153 @@ pub fn pick(drivers: &[HidDriver], vid: u16, pid: u16) -> Option<usize> {
     (s > 0).then_some(best)
 }
 
+/// Drivers to try on (vid, pid), in order. A product a driver claims exactly is a known product of
+/// that driver, so it goes to that driver alone; any other product goes to its whole-vendor driver
+/// (if any), then down the vendor's chain.
+pub fn candidates(drivers: &[HidDriver], chains: &[Chain], vid: u16, pid: u16) -> Vec<usize> {
+    let exact = |d: &HidDriver| {
+        d.matches
+            .iter()
+            .any(|m| m.vid == vid && m.pids.contains(&pid))
+    };
+    if let Some(i) = drivers.iter().position(exact) {
+        return vec![i];
+    }
+    let mut out: Vec<usize> = pick(drivers, vid, pid).into_iter().collect();
+    let chained = chains
+        .iter()
+        .filter(|c| c.vid == vid)
+        .flat_map(|c| c.drivers);
+    for i in chained.filter_map(|n| drivers.iter().position(|d| d.name == *n)) {
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// What one round of driver jobs returned, per driver index: its devices, or None when it did not
+/// return in time (or could not start).
+pub type Round = Vec<(usize, Option<Vec<Device>>)>;
+
+/// Hands each HID collection to the first of its `candidates`, then, round by round, the collections
+/// of a driver that reported no device at all to their next candidate. A driver's collections are
+/// settled once it reports anything (as the fallback rule always was: a product counts as claimed
+/// once its driver reports something), so no product is read by two drivers. A driver that missed
+/// the deadline is still running on its handles and its collections are left alone.
+///
+/// Returns the devices per driver index and the collections nobody reported (for the fallback).
+pub fn route<T: Clone>(
+    items: &[T],
+    candidates: impl Fn(&T) -> Vec<usize>,
+    mut run: impl FnMut(Vec<(usize, Vec<T>)>) -> Round,
+) -> (Vec<(usize, Vec<Device>)>, Vec<T>) {
+    let mut pending: Vec<(T, Vec<usize>, usize)> = items
+        .iter()
+        .map(|t| (t.clone(), candidates(t), 0))
+        .collect();
+    let mut results = Vec::new();
+    let mut unclaimed = Vec::new();
+    loop {
+        let mut jobs: Vec<(usize, Vec<T>)> = Vec::new();
+        let mut asked = Vec::new();
+        for (t, cands, n) in pending.drain(..) {
+            let Some(&i) = cands.get(n) else {
+                unclaimed.push(t);
+                continue;
+            };
+            match jobs.iter_mut().find(|(j, _)| *j == i) {
+                Some((_, ts)) => ts.push(t.clone()),
+                None => jobs.push((i, vec![t.clone()])),
+            }
+            asked.push((t, cands, n));
+        }
+        if jobs.is_empty() {
+            return (results, unclaimed);
+        }
+        let got = run(jobs);
+        for (t, cands, n) in asked {
+            let reported = got.iter().find(|(i, _)| *i == cands[n]).map(|(_, d)| d);
+            if let Some(Some(d)) = reported
+                && d.is_empty()
+            {
+                pending.push((t, cands, n + 1));
+            }
+        }
+        results.extend(got.into_iter().filter_map(|(i, d)| Some((i, d?))));
+    }
+}
+
 /// Runs every HID driver and source in parallel and returns their devices in registry order.
 pub fn poll(
     api: Arc<HidApi>,
     drivers: &'static [HidDriver],
+    chains: &[Chain],
     fallback: &'static HidDriver,
     sources: &'static [Source],
     timeout: Duration,
 ) -> Vec<Device> {
-    // Index drivers.len() is the fallback, which gets everything no vendor driver matched (and,
-    // after the vendor drivers ran, the products they did not recognise).
-    let mut assigned: Vec<Vec<DeviceInfo>> = vec![Vec::new(); drivers.len() + 1];
-    for info in api.device_list() {
-        let i = pick(drivers, info.vendor_id(), info.product_id()).unwrap_or(drivers.len());
-        assigned[i].push(info.clone());
-    }
+    let infos: Vec<DeviceInfo> = api.device_list().cloned().collect();
+    let cands =
+        |info: &DeviceInfo| candidates(drivers, chains, info.vendor_id(), info.product_id());
 
-    let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
-    let mut jobs: Vec<(usize, &'static str)> = Vec::new();
-    // Vendor drivers run in parallel now; the fallback runs after them (below), because it also
-    // gets the products of vendor drivers that did not recognise them.
-    for (i, (driver, infos)) in drivers.iter().zip(&assigned).enumerate() {
-        if infos.is_empty() {
-            continue;
-        }
-        let (tx, api, infos) = (tx.clone(), api.clone(), infos.clone());
-        if spawn(driver.name, move || {
-            let _ = tx.send((i, (driver.poll)(&api, &infos)));
-        }) {
-            jobs.push((i, driver.name));
-        }
-    }
+    // Sources need no HID access: they run alongside every driver round.
+    let (stx, srx) = mpsc::channel::<(usize, Vec<Device>)>();
     let first_source = drivers.len() + 1;
+    let mut source_jobs = Vec::new();
     for (j, source) in sources.iter().enumerate() {
-        let tx = tx.clone();
+        let tx = stx.clone();
         if spawn(source.name, move || {
             let _ = tx.send((first_source + j, (source.poll)()));
         }) {
-            jobs.push((first_source + j, source.name));
+            source_jobs.push((first_source + j, source.name));
         }
     }
-    drop(tx);
+    drop(stx);
+    let sources_deadline = Instant::now() + timeout;
 
-    // A late driver keeps running detached (and is skipped by later polls until it returns); its
-    // result is discarded when it finally arrives.
-    let deadline = Instant::now() + timeout;
-    let mut results = Vec::with_capacity(jobs.len());
-    while results.len() < jobs.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(left) {
-            Ok(r) => results.push(r),
-            Err(_) => break,
+    // Vendor drivers run in parallel, each round with its own deadline. A late driver keeps running
+    // detached (and is skipped by later polls until it returns); its result is discarded when it
+    // finally arrives. The generic fallback runs last, on what no vendor driver reported, so an
+    // unknown model of a whole-vendor match can still be read through standard HID.
+    let (mut results, fallback_infos) = route(&infos, cands, |jobs| {
+        let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
+        let mut started = Vec::new();
+        for (i, infos) in &jobs {
+            let (i, driver) = (*i, &drivers[*i]);
+            let (tx, api, infos) = (tx.clone(), api.clone(), infos.clone());
+            if spawn(driver.name, move || {
+                let _ = tx.send((i, (driver.poll)(&api, &infos)));
+            }) {
+                started.push(i);
+            }
         }
-    }
-    for (i, name) in &jobs {
-        if !results.iter().any(|(r, _)| r == i) {
-            eprintln!("driver {name} missed the {} s deadline", timeout.as_secs());
-        }
-    }
-    // A product counts as claimed only once its driver reports something (BatteryHub's rule): the
-    // products of a vendor driver that answered with no device also go to the generic fallback,
-    // so an unknown model of a whole-vendor match can still be read through standard HID.
-    // A driver that missed the deadline is still running on its handles and is left alone.
-    let mut fallback_infos = assigned[drivers.len()].clone();
-    for (i, devices) in &results {
-        if *i < drivers.len() && devices.is_empty() {
-            fallback_infos.extend(assigned[*i].iter().cloned());
-        }
-    }
+        drop(tx);
+        let got = collect(&rx, started.len(), Instant::now() + timeout);
+        jobs.iter()
+            .map(|(i, _)| {
+                let d = got.iter().find(|(r, _)| r == i).map(|(_, d)| d.clone());
+                if d.is_none() && started.contains(i) {
+                    eprintln!(
+                        "driver {} missed the {} s deadline",
+                        drivers[*i].name,
+                        timeout.as_secs()
+                    );
+                }
+                (*i, d)
+            })
+            .collect()
+    });
     if !fallback_infos.is_empty() {
         results.push((drivers.len(), (fallback.poll)(&api, &fallback_infos)));
     }
+    let sources_got = collect(&srx, source_jobs.len(), sources_deadline);
+    for (i, name) in &source_jobs {
+        if !sources_got.iter().any(|(r, _)| r == i) {
+            eprintln!("source {name} missed the {} s deadline", timeout.as_secs());
+        }
+    }
+    results.extend(sources_got);
     results.sort_by_key(|(i, _)| *i);
 
     // Physical devices (Windows container ids) a HID driver reported, so the same device seen
@@ -773,20 +890,18 @@ pub fn poll(
     let has_bt = results
         .iter()
         .any(|(_, ds)| ds.iter().any(|d| d.key.starts_with("bt:")));
-    let containers = |pred: &dyn Fn(usize) -> bool| -> Vec<String> {
-        if !has_bt {
-            return Vec::new();
-        }
-        // Every collection a vendor driver handles counts, even when it returned nothing this poll
-        // (asleep): the tracker still shows that device, so its Bluetooth copy must stay hidden.
-        (0..assigned.len())
-            .filter(|i| pred(*i))
-            .flat_map(|i| &assigned[i])
+    // Every collection a vendor driver handles counts, even when it returned nothing this poll
+    // (asleep): the tracker still shows that device, so its Bluetooth copy must stay hidden.
+    let vendor: Vec<String> = if has_bt {
+        infos
+            .iter()
+            .filter(|info| !cands(info).is_empty())
             .filter_map(|info| bluetooth::container_of(info.path()))
             .map(|c| format!("bt:{c}"))
             .collect()
+    } else {
+        Vec::new()
     };
-    let vendor = containers(&|i| i < drivers.len());
     // The generic HID reading of a Bluetooth device loses to Windows' own level for it.
     let generic: Vec<(String, String)> = if has_bt {
         fallback_infos
@@ -807,6 +922,22 @@ pub fn poll(
         &vendor,
         &generic,
     )
+}
+
+/// Up to `n` results from `rx`, until `deadline`.
+fn collect(
+    rx: &mpsc::Receiver<(usize, Vec<Device>)>,
+    n: usize,
+    deadline: Instant,
+) -> Vec<(usize, Vec<Device>)> {
+    let mut got = Vec::with_capacity(n);
+    while got.len() < n {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(r) => got.push(r),
+            Err(_) => break,
+        }
+    }
+    got
 }
 
 /// Drops second readings of one physical device:
@@ -1009,6 +1140,188 @@ mod tests {
         assert_eq!(name(0x0B0E, 0x2E51), Some("jabra"));
     }
 
+    // ---- Chains ----
+
+    static CHAINED: &[HidDriver] = &[
+        HidDriver {
+            name: "exact",
+            matches: &[Match {
+                vid: 0x33E4,
+                pids: &[0x3519],
+            }],
+            poll: none,
+        },
+        HidDriver {
+            name: "second",
+            matches: &[],
+            poll: none,
+        },
+        HidDriver {
+            name: "first",
+            matches: &[],
+            poll: none,
+        },
+        HidDriver {
+            name: "vendor-wide",
+            matches: &[Match {
+                vid: 0x3554,
+                pids: &[],
+            }],
+            poll: none,
+        },
+    ];
+    static TEST_CHAINS: &[Chain] = &[
+        Chain {
+            vid: 0x33E4,
+            drivers: &["first", "second"],
+        },
+        Chain {
+            vid: 0x3554,
+            drivers: &["second", "vendor-wide"],
+        },
+    ];
+
+    #[test]
+    fn chain_order_comes_from_the_chain_not_the_registry() {
+        let c = |vid, pid| candidates(CHAINED, TEST_CHAINS, vid, pid);
+        assert_eq!(c(0x33E4, 0x5408), [2, 1]);
+        // An exact claim is a known product of that driver: no other protocol is tried on it.
+        assert_eq!(c(0x33E4, 0x3519), [0]);
+        // The whole-vendor driver comes first, and is not asked twice.
+        assert_eq!(c(0x3554, 0x0001), [3, 1]);
+        assert!(c(0x1234, 0x0001).is_empty());
+    }
+
+    fn mouse(key: &str) -> Device {
+        dev(key, "Mouse")
+    }
+
+    /// Runs `route` over products with fake drivers: `answer(driver, products)` is what a driver
+    /// returns for the products handed to it. Returns (devices, unclaimed, every job run).
+    #[allow(clippy::type_complexity)]
+    fn route_with(
+        products: &[(u16, u16)],
+        cands: impl Fn(&(u16, u16)) -> Vec<usize>,
+        answer: impl Fn(usize, &[(u16, u16)]) -> Option<Vec<Device>>,
+    ) -> (
+        Vec<String>,
+        Vec<(u16, u16)>,
+        Vec<Vec<(usize, Vec<(u16, u16)>)>>,
+    ) {
+        let mut rounds = Vec::new();
+        let (got, left) = route(products, cands, |jobs| {
+            rounds.push(jobs.clone());
+            jobs.iter().map(|(i, ps)| (*i, answer(*i, ps))).collect()
+        });
+        let keys = got
+            .into_iter()
+            .flat_map(|(_, ds)| ds)
+            .map(|d| d.key)
+            .collect();
+        (keys, left, rounds)
+    }
+
+    const G: (u16, u16) = (0x33E4, 0x5408);
+    const K: (u16, u16) = (0x33E4, 0x7777);
+
+    #[test]
+    fn first_driver_that_reports_wins() {
+        let cands = |p: &(u16, u16)| candidates(CHAINED, TEST_CHAINS, p.0, p.1);
+        // "first" (2) reads G: "second" (1) is never asked.
+        let (keys, left, rounds) = route_with(&[G], cands, |i, _| match i {
+            2 => Some(vec![mouse("first:G")]),
+            _ => Some(vec![mouse("second:G")]),
+        });
+        assert_eq!(
+            (keys, left.len(), rounds.len()),
+            (vec!["first:G".into()], 0, 1)
+        );
+        // "first" does not speak it: the product goes down the chain, alone.
+        let (keys, left, rounds) = route_with(&[K], cands, |i, _| match i {
+            2 => Some(vec![]),
+            _ => Some(vec![mouse("second:K")]),
+        });
+        assert_eq!((keys, left.len()), (vec!["second:K".to_string()], 0));
+        assert_eq!(rounds, [vec![(2, vec![K])], vec![(1, vec![K])]]);
+    }
+
+    #[test]
+    fn product_nobody_reports_goes_to_the_fallback() {
+        let cands = |p: &(u16, u16)| candidates(CHAINED, TEST_CHAINS, p.0, p.1);
+        let unknown = (0x1234, 0x0001);
+        let (keys, left, rounds) = route_with(&[K, unknown], cands, |_, _| Some(vec![]));
+        assert!(keys.is_empty());
+        assert_eq!(left, [unknown, K]);
+        assert_eq!(
+            rounds.len(),
+            2,
+            "first, then second; never the fallback twice"
+        );
+    }
+
+    #[test]
+    fn a_late_driver_keeps_its_products() {
+        let cands = |p: &(u16, u16)| candidates(CHAINED, TEST_CHAINS, p.0, p.1);
+        // "first" missed the deadline (or was still busy): still running on its handles, so its
+        // products go neither down the chain nor to the fallback.
+        let (keys, left, rounds) = route_with(&[K], cands, |i, _| match i {
+            2 => None,
+            _ => Some(vec![mouse("second:K")]),
+        });
+        assert!(keys.is_empty() && left.is_empty());
+        assert_eq!(rounds.len(), 1);
+    }
+
+    #[test]
+    fn a_product_is_read_by_one_driver_only() {
+        let cands = |p: &(u16, u16)| candidates(CHAINED, TEST_CHAINS, p.0, p.1);
+        let exact = (0x33E4, 0x3519);
+        // Everyone answers everything: each product still ends up with exactly one reading, from
+        // its first candidate, and a driver's products move on only when it reported nothing.
+        let (keys, left, rounds) = route_with(&[G, exact, K], cands, |i, ps| {
+            Some(
+                ps.iter()
+                    .map(|p| mouse(&format!("{i}:{:04X}", p.1)))
+                    .collect(),
+            )
+        });
+        assert_eq!(keys, ["2:5408", "2:7777", "0:3519"]);
+        assert!(left.is_empty());
+        assert_eq!(rounds.len(), 1);
+    }
+
+    #[test]
+    fn real_chains_name_registered_drivers_once() {
+        for c in CHAINS {
+            for (n, name) in c.drivers.iter().enumerate() {
+                assert!(
+                    HID_DRIVERS.iter().any(|d| d.name == *name),
+                    "chain {:04X}: no driver {name}",
+                    c.vid
+                );
+                assert!(!c.drivers[..n].contains(name), "{name} twice in a chain");
+            }
+        }
+        let names = |vid, pid| -> Vec<&str> {
+            candidates(HID_DRIVERS, CHAINS, vid, pid)
+                .into_iter()
+                .map(|i| HID_DRIVERS[i].name)
+                .collect()
+        };
+        // G-Wolves and Hitscan: Glorious' protocol first, then Kysona's (BatteryHub's order).
+        assert_eq!(names(0x33E4, 0x5408), ["glorious", "kysona"]);
+        assert_eq!(names(0x3770, 0x0300), ["glorious", "kysona"]);
+        // Kysona-protocol mice outside the listed ids (Kysona M600, VXE X3 Pro and the like).
+        assert_eq!(names(0x3554, 0xF5F0), ["kysona"]);
+        // Products claimed exactly stay with their driver.
+        assert_eq!(names(0x33E4, 0x3519), ["kysona"]);
+        assert_eq!(names(0x3770, 0x0136), ["glorious"]);
+        assert_eq!(names(0x3554, 0xF512), ["chimera"]);
+        assert_eq!(names(0x3554, 0xFA09), ["aula"]);
+    }
+
+    /// The first candidate of a product is unambiguous: no product is claimed exactly by two
+    /// drivers. Chains add later candidates on purpose, in their own order, so they are not claims.
     #[test]
     fn registry_has_no_duplicate_exact_claims() {
         let mut seen = Vec::new();
@@ -1027,7 +1340,8 @@ mod tests {
     }
 
     /// Two whole-vendor drivers on one vid would leave the winner to registry order, the fragile
-    /// ordering this design exists to avoid.
+    /// ordering this design exists to avoid; a vendor whose products need several drivers tried
+    /// declares that order in `CHAINS` instead.
     #[test]
     fn registry_has_no_duplicate_whole_vendor_claims() {
         let mut seen = Vec::new();

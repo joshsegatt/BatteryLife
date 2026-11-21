@@ -1,14 +1,16 @@
-//! Glorious (Sinowealth 258A), Hitscan (3770) and the WLMouse YING (36A7:A874) wireless mice, on one
-//! supplier protocol: SET_FEATURE report 0 (64 bytes) [3]=02 [4]=02 [6]=83, then GET_FEATURE report
+//! Glorious (Sinowealth 258A), Hitscan (3770), G-Wolves (33E4) and the WLMouse YING (36A7:A874)
+//! wireless mice, on one supplier protocol (G-Wolves calls it "XVI"): SET_FEATURE report 0 (64 bytes) [3]=02 [4]=02 [6]=83, then GET_FEATURE report
 //! 0 -> [1] status, [6] 83, [7] charging (1), [8] percent. Status A1 awake, A4 asleep, A0 waking up
 //! (asked again once), anything else = not this protocol. Only this read is sent.
 //!
-//! G-Wolves (33E4) mice speak either this protocol or Kysona's, and BatteryHub tells them apart by
-//! probing both; a declarative registry cannot, so 33E4 is left to the Kysona port.
+//! G-Wolves and Hitscan mice speak either this protocol or Kysona's, and BatteryHub tells them apart
+//! by probing both, this one first: the registry's chains do the same for the products no driver
+//! claims exactly.
 //!
 //! Ported from BatteryHub (src/drivers/glorious.cpp, commit fd2267d),
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits
-//! glorious-indicator, glorious-ctl and Hitscan's web configurator.
+//! glorious-indicator, glorious-ctl, Hitscan's web configurator and G-Wolves' (mouse.xyz,
+//! Config/env-models.json, for the model names and cable ids).
 
 use std::time::Duration;
 
@@ -21,6 +23,7 @@ use crate::drivers::hid::{self, Coll, Hid, find, products};
 pub const VID_SINOWEALTH: u16 = 0x258A;
 pub const VID_HITSCAN: u16 = 0x3770;
 pub const HITSCAN_PIDS: &[u16] = &[0x0136, 0x0194];
+pub const VID_GWOLVES: u16 = 0x33E4;
 pub const VID_WLMOUSE: u16 = 0x36A7;
 pub const WLMOUSE_YING_PIDS: &[u16] = &[0xA874];
 
@@ -61,6 +64,53 @@ fn hitscan_cable(pid: u16) -> bool {
     pid == 0x0136 || pid == 0x0194
 }
 
+/// G-Wolves model names; 33E4:3854 is a dongle shared by many models, so it has no specific name.
+pub fn gwolves_name(pid: u16) -> &'static str {
+    match pid {
+        0x3808 | 0x3817 => "G-Wolves HTM Plus",
+        0x6808 | 0x6817 => "G-Wolves HSK Pro 2.0",
+        0x5608 | 0x5617 | 0x5618 | 0x5619 => "G-Wolves HTXU",
+        0x3608 | 0x3617 | 0x3619 => "G-Wolves Fenrir Pro",
+        0x3908 | 0x3917 => "G-Wolves VUK",
+        0x7904 | 0x7913 => "G-Wolves HT-S2",
+        0x3708 | 0x3717 => "G-Wolves Fenrir Max",
+        0x5308 | 0x5317 => "G-Wolves HTS Ultra",
+        0x7704 | 0x7713 => "G-Wolves HTR",
+        0x3508 | 0x3517 => "G-Wolves Fenrir",
+        0x7908 | 0x7917 => "G-Wolves HT-S2 Pro",
+        0x5808 | 0x5817 => "G-Wolves HSK Pro",
+        0x2708 | 0x2717 | 0x2719 => "G-Wolves HTX Mini",
+        0x5408 | 0x5417 | 0x5418 | 0x5419 => "G-Wolves HTS Plus",
+        0x5708 | 0x5717 => "G-Wolves HTX",
+        0x5908 | 0x5917 => "G-Wolves HSK Plus",
+        0x7204 | 0x7203 => "G-Wolves HSK Lite",
+        0x7708 | 0x7717 => "G-Wolves HTR Pro",
+        0x5804 | 0x5803 => "G-Wolves HSK Pro ACE",
+        0x5404 | 0x5403 => "G-Wolves HTS Plus ACE",
+        0x5704 | 0x5703 => "G-Wolves HTX ACE",
+        0x5904 | 0x5903 => "G-Wolves HSK Plus ACE",
+        0x4718 | 0x4719 => "G-Wolves Lycan",
+        0x4219 => "G-Wolves WARG",
+        0x5219 => "G-Wolves HTS Plus Pro",
+        0x3519 => "G-Wolves Fenrir Asym",
+        0x2619 => "G-Wolves HTX Mini Asym",
+        0x1619 => "G-Wolves Fenrir Max Asym",
+        0x2119 => "G-Wolves VUK Mini",
+        _ => "G-Wolves wireless mouse",
+    }
+}
+
+/// G-Wolves' wired product ids.
+pub fn gwolves_cable(pid: u16) -> bool {
+    [
+        0x1619, 0x2119, 0x2619, 0x2708, 0x2719, 0x3508, 0x3519, 0x3608, 0x3619, 0x3708, 0x3808,
+        0x3908, 0x4219, 0x4718, 0x4719, 0x5219, 0x5308, 0x5404, 0x5408, 0x5418, 0x5419, 0x5608,
+        0x5618, 0x5619, 0x5704, 0x5708, 0x5804, 0x5808, 0x5904, 0x5908, 0x6808, 0x7204, 0x7704,
+        0x7708, 0x7904, 0x7908,
+    ]
+    .contains(&pid)
+}
+
 const VENDORS: &[Vendor] = &[
     Vendor {
         vid: VID_SINOWEALTH,
@@ -76,6 +126,14 @@ const VENDORS: &[Vendor] = &[
         reply_delay_ms: 200,
         name: hitscan_name,
         is_cable: hitscan_cable,
+        matches: |_| true,
+    },
+    Vendor {
+        vid: VID_GWOLVES,
+        key_prefix: "gwolves:",
+        reply_delay_ms: 100,
+        name: |pid| Some(gwolves_name(pid)),
+        is_cable: gwolves_cable,
         matches: |_| true,
     },
     Vendor {
@@ -310,6 +368,29 @@ mod tests {
         assert_eq!(
             (out[0].name.as_str(), out[0].key.as_str()),
             ("WLMouse YING", "wlmouse:A874")
+        );
+    }
+
+    #[test]
+    fn g_wolves_on_this_protocol() {
+        let out = poll_with(&mut fake(vec![reply(0xA1, 0, 64)]), &[coll(0x33E4, 0x3854)]);
+        assert_eq!(
+            (
+                out[0].name.as_str(),
+                out[0].key.as_str(),
+                out[0].via.as_str()
+            ),
+            (
+                "G-Wolves wireless mouse",
+                "gwolves:3854",
+                "2.4 GHz receiver"
+            )
+        );
+        assert_eq!(out[0].percent, Some(64));
+        let out = poll_with(&mut fake(vec![reply(0xA1, 0, 80)]), &[coll(0x33E4, 0x5408)]);
+        assert_eq!(
+            (out[0].name.as_str(), out[0].via.as_str(), out[0].charging),
+            ("G-Wolves HTS Plus", "USB cable", true)
         );
     }
 }
