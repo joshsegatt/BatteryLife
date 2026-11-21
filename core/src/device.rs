@@ -67,6 +67,52 @@ impl Device {
     }
 }
 
+/// Device kind from a product name, for sources that report no type.
+pub fn guess_kind(name: &str) -> Kind {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&[
+        "mouse",
+        "superlight",
+        "viper",
+        "deathadder",
+        "basilisk",
+        "pulsefire",
+        "rival",
+        "aerox",
+    ]) {
+        Kind::Mouse
+    } else if has(&[
+        "headset",
+        "headphone",
+        "buds",
+        "earbuds",
+        "airpods",
+        "cloud",
+        "arctis",
+        "kraken",
+        "g435",
+        "g733",
+    ]) {
+        Kind::Headset
+    } else if has(&["keyboard", "keys", "keychron"]) {
+        Kind::Keyboard
+    } else if has(&[
+        "controller",
+        "gamepad",
+        "dualsense",
+        "dualshock",
+        "joy-con",
+        "xbox",
+    ]) {
+        Kind::Gamepad
+    } else if has(&["phone", "iphone", "galaxy s", "pixel"]) {
+        Kind::Phone
+    } else {
+        Kind::Other
+    }
+}
+
 /// Piecewise-linear interpolation through (mv[i], pct[i]); tables sorted by descending voltage.
 pub fn interpolate(mv: i32, mv_table: &[i32], pct_table: &[i32]) -> u8 {
     let n = mv_table.len();
