@@ -41,8 +41,10 @@ public sealed class CoreClient : IDisposable
     private async Task RunAsync()
     {
         var delay = TimeSpan.FromSeconds(1);
+        int failuresInARow = 0;
         while (!_stop.IsCancellationRequested)
         {
+            bool gotData = false;
             if (!File.Exists(_exe))
             {
                 Failed?.Invoke($"batterylife-core.exe not found next to the app ({_exe})");
@@ -65,7 +67,12 @@ public sealed class CoreClient : IDisposable
 
                 while (await p.StandardOutput.ReadLineAsync(_stop.Token) is { } line)
                 {
-                    if (CoreProtocol.ParseLine(line) is { } devices) Updated?.Invoke(devices);
+                    if (CoreProtocol.ParseLine(line) is { } devices)
+                    {
+                        gotData = true;
+                        failuresInARow = 0;
+                        Updated?.Invoke(devices);
+                    }
                 }
                 await p.WaitForExitAsync(_stop.Token);
             }
@@ -81,6 +88,10 @@ public sealed class CoreClient : IDisposable
             {
                 _process = null;
             }
+
+            // Three runs in a row without a single reading: tell the UI the reader is down (it keeps
+            // retrying, and the next good reading replaces that state).
+            if (!gotData && ++failuresInARow == 3) Failed?.Invoke("batterylife-core exits without reporting devices");
 
             // Crashed or exited: restart, backing off up to a minute if it keeps dying quickly.
             delay = DateTime.UtcNow - started > TimeSpan.FromMinutes(5)

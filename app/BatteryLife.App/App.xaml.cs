@@ -26,6 +26,8 @@ public partial class App : Application
     private readonly AlertRules _alerts = new();
     private bool _toasts;
     private bool _openOnFirstUpdate;
+    private bool _demo;
+    private Board? _lastBoard;
 
     public App() => InitializeComponent();
 
@@ -78,25 +80,42 @@ public partial class App : Application
             _toasts = false; // fall back to the tray balloon
         }
 
-        // Windows puts new tray icons in the ^ overflow and no app may pin itself: show the way once.
-        if (Startup.IsFirstRun()) Show(_text.WelcomeTitle, _text.WelcomeBody, (_text.PinIcon, "pin"));
+        // A contrast theme switched on while running repaints the code-built parts right away.
+        Palette.Ui.ColorValuesChanged += (_, _) => _ui.TryEnqueue(() =>
+        {
+            if (_lastBoard is not null) _flyout.Render(_lastBoard, animate: false);
+        });
 
         var argv = Environment.GetCommandLineArgs();
         _openOnFirstUpdate = argv.Contains("--open");
         _flyout.Pinned = _openOnFirstUpdate;
-        if (argv.Contains("--demo"))
+        _demo = argv.Contains("--demo");
+        if (_demo)
         {
-            // Synthetic devices for screenshots and design review; never mixed with real readings.
+            // Synthetic devices for screenshots and design review: no alerts, no first-run hint.
             OnDevices(Demo.Devices(argv.Contains("--calm")));
             return;
         }
+
+        // Windows puts new tray icons in the ^ overflow and no app may pin itself: show the way once.
+        if (Startup.IsFirstRun()) Show(_text.WelcomeTitle, _text.WelcomeBody, (_text.PinIcon, "pin"));
 
         _core = new CoreClient(Path.Combine(AppContext.BaseDirectory, "batterylife-core.exe"));
         _core.Updated += devices => _ui.TryEnqueue(() => OnDevices(devices));
         _core.Failed += message => _ui.TryEnqueue(() =>
         {
+            // Say the reader is down instead of "no devices found", which would send the user off
+            // switching devices on and off for nothing.
+            _lastBoard = Board.ReaderDown();
+            _flyout.Render(_lastBoard);
+            _tray.IconSource = TrayIcon(_lastBoard);
             _tray.ToolTipText = $"BatteryLife: {_text.CoreMissing}";
             System.Diagnostics.Debug.WriteLine(message);
+            if (_openOnFirstUpdate)
+            {
+                _openOnFirstUpdate = false;
+                _flyout.Toggle();
+            }
         });
         _core.Start();
     }
@@ -104,13 +123,15 @@ public partial class App : Application
     private void OnDevices(IReadOnlyList<DeviceReading> devices)
     {
         var board = Board.From(devices);
+        _lastBoard = board;
         _flyout?.Render(board);
         if (_tray is not null)
         {
             _tray.IconSource = TrayIcon(board);
             _tray.ToolTipText = _text.Tooltip(devices);
         }
-        foreach (var d in _alerts.Check(devices)) Notify(d);
+        if (!_demo)
+            foreach (var d in _alerts.Check(devices)) Notify(d);
         if (_openOnFirstUpdate)
         {
             _openOnFirstUpdate = false;
@@ -123,13 +144,14 @@ public partial class App : Application
     private static GeneratedIconSource TrayIcon(Board board)
     {
         bool action = board.State is BoardState.Action or BoardState.Critical;
-        string text = board.Lead?.Percent is int p ? (p >= 100 ? "F" : p.ToString(CultureInfo.InvariantCulture)) : "–";
+        string text = board.State == BoardState.ReaderDown ? "!"
+            : board.Lead?.Percent is int p ? p.ToString(CultureInfo.InvariantCulture) : "–";
         return new GeneratedIconSource
         {
             Text = text,
             FontFamily = new FontFamily("Segoe UI Variable Display"),
             FontWeight = FontWeights.Bold,
-            FontSize = text.Length > 1 ? 34 : 40,
+            FontSize = text.Length switch { >= 3 => 26, 2 => 34, _ => 40 },
             Foreground = new SolidColorBrush(action ? Microsoft.UI.ColorHelper.FromArgb(255, 0x11, 0x11, 0x11) : Microsoft.UI.Colors.White),
             Background = new SolidColorBrush(action ? Microsoft.UI.ColorHelper.FromArgb(255, 0xFF, 0xD2, 0x00) : Microsoft.UI.ColorHelper.FromArgb(255, 0x1C, 0x1C, 0x1C)),
             CornerRadius = new CornerRadius(6),

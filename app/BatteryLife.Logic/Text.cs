@@ -51,6 +51,7 @@ public sealed class Text
     public string Headline(Board b) => b.State switch
     {
         BoardState.NoDevices => T("Nenhum aparelho sem fio encontrado", "No wireless devices found"),
+        BoardState.ReaderDown => T("Não foi possível ler os aparelhos", "Could not read your devices"),
         BoardState.Critical => T($"Carregue {KindInSentence(b.Lead!.Kind)} agora", $"Charge {KindInSentence(b.Lead!.Kind)} now"),
         BoardState.Action => T($"Carregue {KindInSentence(b.Lead!.Kind)} antes de jogar",
                                $"Charge {KindInSentence(b.Lead!.Kind)} before you play"),
@@ -60,7 +61,7 @@ public sealed class Text
     /// <summary>The band's monumental figure: time left when estimated, otherwise the level.</summary>
     public string Figure(Board b) => b.Lead switch
     {
-        null => b.State == BoardState.NoDevices ? "" : T("Tudo certo", "All good"),
+        null => b.State is BoardState.NoDevices or BoardState.ReaderDown ? "" : T("Tudo certo", "All good"),
         { MinutesLeft: int m } => Duration(m),
         { Percent: int p } => $"{p}%",
         _ => "",
@@ -71,6 +72,9 @@ public sealed class Text
     {
         if (b.State == BoardState.NoDevices)
             return T("Ligue um mouse, headset ou teclado sem fio", "Turn on a wireless mouse, headset or keyboard");
+        if (b.State == BoardState.ReaderDown)
+            return T("Reinstale o BatteryLife ou libere o batterylife-core.exe no antivírus.",
+                     "Reinstall BatteryLife or allow batterylife-core.exe in your antivirus.");
         if (b.Lead is not { } d) return T("Nenhum aparelho descarregando", "Nothing is discharging");
         var parts = new List<string> { d.Name };
         if (d.Percent is int p) parts.Add($"{p}%");

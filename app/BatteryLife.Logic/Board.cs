@@ -10,6 +10,8 @@ public enum BoardState
     Action,
     /// <summary>A device is at 5% or less.</summary>
     Critical,
+    /// <summary>The device reader (core process) cannot run: levels are unknown, not absent.</summary>
+    ReaderDown,
 }
 
 /// <summary>
@@ -20,6 +22,8 @@ public sealed record Board(BoardState State, DeviceReading? Lead, IReadOnlyList<
 {
     public const int DefaultThreshold = 15;
     public const int CriticalLevel = 5;
+
+    public static Board ReaderDown() => new(BoardState.ReaderDown, null, []);
 
     /// <summary>
     /// Picks the lead device. Needs charging = level known, at or below the threshold, not charging.

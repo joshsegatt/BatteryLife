@@ -9,6 +9,11 @@ public static class Palette
 {
     private static readonly AccessibilitySettings Accessibility = new();
 
+    /// <summary>Raises ColorValuesChanged (on a background thread) when Windows colors change,
+    /// contrast themes included. Kept alive here so the event keeps firing.
+    /// AccessibilitySettings.HighContrastChanged is not usable from a desktop app.</summary>
+    public static readonly UISettings Ui = new();
+
     public static bool HighContrast => Accessibility.HighContrast;
 
     public static Brush Brush(string key)

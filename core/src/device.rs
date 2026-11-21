@@ -34,6 +34,10 @@ pub struct Device {
     /// Estimated minutes until empty, from the drain observed while discharging. None until there
     /// is enough history (at least 20 minutes and a 2-point drop).
     pub minutes_left: Option<u32>,
+    /// The level is a coarse step (e.g. 100/60/20/5 from level flags), not a measured percentage:
+    /// such steps are too big to estimate time left from.
+    #[serde(skip)]
+    pub coarse: bool,
     /// How long the last known level stays visible after the device stops answering.
     #[serde(skip)]
     pub grace: Duration,
@@ -57,6 +61,7 @@ impl Device {
             asleep: false,
             millivolts: None,
             minutes_left: None,
+            coarse: false,
             grace: Duration::ZERO,
         }
     }

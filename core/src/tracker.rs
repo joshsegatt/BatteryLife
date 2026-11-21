@@ -28,6 +28,10 @@ const MIN_DROP: f64 = 2.0;
 /// Records a fresh reading and returns the estimated minutes until empty.
 fn estimate(samples: &mut Vec<(Instant, u8)>, d: &Device, now: Instant) -> Option<u32> {
     let pct = d.percent?;
+    if d.coarse {
+        samples.clear();
+        return None;
+    }
     // Charging, or a level that went up (charged in between): start a new discharge run.
     if d.charging || samples.last().is_some_and(|(_, p)| pct > *p) {
         samples.clear();
@@ -150,6 +154,22 @@ mod tests {
         assert_eq!(
             t.update(vec![mouse(Some(86))], at(t0, 100))[0].minutes_left,
             Some(645)
+        );
+    }
+
+    #[test]
+    fn coarse_levels_get_no_estimate() {
+        let mut t = Tracker::default();
+        let t0 = Instant::now();
+        let coarse = |pct| {
+            let mut d = mouse(Some(pct));
+            d.coarse = true;
+            d
+        };
+        t.update(vec![coarse(60)], t0);
+        assert_eq!(
+            t.update(vec![coarse(20)], at(t0, 180))[0].minutes_left,
+            None
         );
     }
 

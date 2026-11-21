@@ -130,6 +130,16 @@ public class LogicTests
     }
 
     [Fact]
+    public void Reader_down_is_not_reported_as_no_devices()
+    {
+        var pt = Text.For(new CultureInfo("pt-BR"));
+        var b = Board.ReaderDown();
+        Assert.Equal("Não foi possível ler os aparelhos", pt.Headline(b));
+        Assert.Equal("", pt.Figure(b));
+        Assert.Contains("batterylife-core.exe", pt.Detail(b));
+    }
+
+    [Fact]
     public void Figure_falls_back_to_level_without_estimate()
     {
         var pt = Text.For(new CultureInfo("pt-BR"));

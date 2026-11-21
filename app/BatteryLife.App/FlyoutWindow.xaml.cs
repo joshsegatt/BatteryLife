@@ -34,6 +34,7 @@ public sealed partial class FlyoutWindow : Window
         InitializeComponent();
 
         var presenter = OverlappedPresenter.CreateForContextMenu();
+        presenter.IsAlwaysOnTop = true; // like Quick Settings: never opens behind other windows
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
         AppWindow.Title = "BatteryLife";
@@ -84,6 +85,8 @@ public sealed partial class FlyoutWindow : Window
     /// <summary>Rises from the taskbar like Quick Settings: a short slide up and fade in.</summary>
     private void SlideIn()
     {
+        Root.Opacity = 1;
+        Slide.Y = 0;
         if (!Palette.Animations) return;
         var ease = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 6 };
         var rise = new DoubleAnimation { From = 14, To = 0, Duration = TimeSpan.FromMilliseconds(260), EasingFunction = ease };
@@ -95,6 +98,13 @@ public sealed partial class FlyoutWindow : Window
         var sb = new Storyboard();
         sb.Children.Add(rise);
         sb.Children.Add(fade);
+        // Pin the end state as local values: the panel must never be left part-faded.
+        sb.Completed += (_, _) =>
+        {
+            sb.Stop();
+            Root.Opacity = 1;
+            Slide.Y = 0;
+        };
         sb.Begin();
     }
 
