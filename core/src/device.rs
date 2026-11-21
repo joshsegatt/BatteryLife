@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -29,6 +31,9 @@ pub struct Device {
     pub asleep: bool,
     /// Battery voltage when the device reports it.
     pub millivolts: Option<u16>,
+    /// How long the last known level stays visible after the device stops answering.
+    #[serde(skip)]
+    pub grace: Duration,
 }
 
 impl Device {
@@ -48,6 +53,7 @@ impl Device {
             full: false,
             asleep: false,
             millivolts: None,
+            grace: Duration::ZERO,
         }
     }
 }

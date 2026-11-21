@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only: builds of pull requests cannot change the repository.
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      # Pinned to a commit so a moved tag cannot swap in different code (v4).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Toolchain
+        run: rustup component add rustfmt clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
