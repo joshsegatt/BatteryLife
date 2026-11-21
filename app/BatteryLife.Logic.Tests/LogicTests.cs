@@ -145,4 +145,30 @@ public class LogicTests
         var pt = Text.For(new CultureInfo("pt-BR"));
         Assert.Equal("12%", pt.Figure(Board.From([Dev("h", 12)])));
     }
+    [Fact]
+    public void Tray_icons_follow_a_fixed_kind_order_and_cap()
+    {
+        var picked = TrayDevices.Pick([
+            Dev("phone", 50, "phone"), Dev("kb", 70, "keyboard"), Dev("toy", 20, "other"),
+            Dev("pad", 30, "gamepad"), Dev("mouse", 90), Dev("hs", 40, "headset")]);
+        Assert.Equal(["mouse", "hs", "kb", "pad"], picked.Select(d => d.Key));
+    }
+
+    [Fact]
+    public void Tray_icon_order_does_not_depend_on_levels()
+    {
+        var before = TrayDevices.Pick([Dev("b", 90), Dev("a", 10)]);
+        var after = TrayDevices.Pick([Dev("a", 95), Dev("b", 5)]);
+        Assert.Equal(before.Select(d => d.Key), after.Select(d => d.Key));
+    }
+
+    [Fact]
+    public void Device_line_says_level_and_state()
+    {
+        var pt = Text.For(new CultureInfo("pt-BR"));
+        Assert.Equal("h: 40%, carregando", pt.DeviceLine(Dev("h", 40, "headset", charging: true, minutes: 30)));
+        Assert.Equal("m: 12% · 48 min", pt.DeviceLine(Dev("m", 12, minutes: 48)));
+        Assert.Equal("m: 80% (último valor)", pt.DeviceLine(Dev("m", 80, asleep: true)));
+        Assert.Equal("m: —", pt.DeviceLine(Dev("m", null)));
+    }
 }

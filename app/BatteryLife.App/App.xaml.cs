@@ -22,6 +22,7 @@ public partial class App : Application
     private Text _text = Text.For(CultureInfo.CurrentUICulture);
     private FlyoutWindow? _flyout;
     private TaskbarIcon? _tray;
+    private DeviceTrayIcons? _deviceIcons;
     private CoreClient? _core;
     private readonly AlertRules _alerts = new();
     private bool _toasts;
@@ -70,6 +71,7 @@ public partial class App : Application
             IconSource = TrayIcon(Board.From([])),
         };
         _tray.ForceCreate(enablesEfficiencyMode: false);
+        _deviceIcons = new DeviceTrayIcons(_text, _tray.LeftClickCommand, menu);
 
         try
         {
@@ -94,6 +96,7 @@ public partial class App : Application
             if (_lastBoard is null) return;
             _flyout.Render(_lastBoard, animate: false);
             if (_tray is not null) _tray.IconSource = TrayIcon(_lastBoard);
+            _deviceIcons?.Repaint();
         });
 
         var argv = Environment.GetCommandLineArgs();
@@ -120,6 +123,7 @@ public partial class App : Application
             _flyout.Render(_lastBoard);
             _tray.IconSource = TrayIcon(_lastBoard);
             _tray.ToolTipText = $"BatteryLife: {_text.CoreMissing}";
+            _deviceIcons?.Update([]); // levels are unknown now, not stale
             System.Diagnostics.Debug.WriteLine(message);
             if (_openOnFirstUpdate)
             {
@@ -140,6 +144,7 @@ public partial class App : Application
             _tray.IconSource = TrayIcon(board);
             _tray.ToolTipText = _text.Tooltip(devices);
         }
+        _deviceIcons?.Update(devices);
         if (!_demo)
             foreach (var d in _alerts.Check(devices)) Notify(d);
         if (_openOnFirstUpdate)
@@ -195,6 +200,7 @@ public partial class App : Application
     {
         _core?.Dispose();
         if (_toasts) AppNotificationManager.Default.Unregister();
+        _deviceIcons?.Dispose();
         _tray?.Dispose();
         _flyout?.Close();
         _single?.ReleaseMutex();

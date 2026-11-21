@@ -29,6 +29,7 @@ Most battery widgets show a row of equal numbers and leave the thinking to you. 
 ## Features
 
 - Tray icon with the level of the device that runs out first, yellow only when it needs charging
+- One more tray icon per device (up to 4): its pictogram over a level bar, yellow when that device needs charging. Drag them out of the **^** area to keep them on the taskbar; a click opens the hub
 - Hub panel in the airport-sign design: next action, every device, charging state, time left
 - Estimated time left from observed drain (needs about 20 minutes of history)
 - Low-battery notification at 15%, with no repeats while the level hovers
