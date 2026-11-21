@@ -125,7 +125,7 @@ public sealed partial class FlyoutWindow : Window
             Band.Background = Palette.Brush(action ? "SignYellowBrush" : "SignRaisedBrush");
             Headline.Foreground = Figure.Foreground = Detail.Foreground = Palette.Brush(action ? "SignInkBrush" : "SignTextBrush");
             BandPictogram.Background = Palette.Brush(action ? "SignInkBrush" : "SignRuleBrush");
-            BandIcon.Foreground = Palette.Brush(action ? "SignYellowBrush" : "SignTextBrush");
+            BandIcon.Foreground = Palette.Brush("SignTextBrush"); // white pictogram on its black square, always
             BandIcon.Glyph = Pictograms.For(board.Lead?.Kind ?? "");
 
             Headline.Text = headline;

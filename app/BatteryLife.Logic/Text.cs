@@ -73,8 +73,9 @@ public sealed class Text
         if (b.State == BoardState.NoDevices)
             return T("Ligue um mouse, headset ou teclado sem fio", "Turn on a wireless mouse, headset or keyboard");
         if (b.State == BoardState.ReaderDown)
-            return T("Reinstale o BatteryLife ou libere o batterylife-core.exe no antivírus.",
-                     "Reinstall BatteryLife or allow batterylife-core.exe in your antivirus.");
+            // Non-breaking hyphen (U+2011) keeps the file name on one line.
+            return T("Reinstale o BatteryLife ou libere o batterylife‑core.exe no antivírus.",
+                     "Reinstall BatteryLife or allow batterylife‑core.exe in your antivirus.");
         if (b.Lead is not { } d) return T("Nenhum aparelho descarregando", "Nothing is discharging");
         var parts = new List<string> { d.Name };
         if (d.Percent is int p) parts.Add($"{p}%");

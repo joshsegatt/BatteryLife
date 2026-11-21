@@ -136,7 +136,7 @@ public class LogicTests
         var b = Board.ReaderDown();
         Assert.Equal("Não foi possível ler os aparelhos", pt.Headline(b));
         Assert.Equal("", pt.Figure(b));
-        Assert.Contains("batterylife-core.exe", pt.Detail(b));
+        Assert.Contains("batterylife‑core.exe", pt.Detail(b));
     }
 
     [Fact]
