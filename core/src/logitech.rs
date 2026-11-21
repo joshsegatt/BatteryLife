@@ -10,9 +10,11 @@
 //! https://github.com/krisgfx9/Wireless-Device-Battery-Monitor, GPL-3.0, which credits the Logitech
 //! HID++ 2.0 drafts, Solaar and HeadsetControl. Headset voltage tables are not ported yet.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use hidapi::{HidApi, HidDevice};
+use hidapi::{DeviceInfo, HidApi, HidDevice};
 
 use crate::device::{Device, Kind, interpolate};
 
@@ -40,6 +42,37 @@ pub trait Link {
         force_short: bool,
         timeout: Duration,
     ) -> Reply;
+
+    /// Pings several device indices. Links that can pipeline (send all, then collect) override this so
+    /// a receiver with five empty slots costs one timeout instead of five.
+    fn ping_many(&mut self, indices: &[u8], timeout: Duration) -> Vec<(u8, Reply)> {
+        indices
+            .iter()
+            .map(|&i| {
+                (
+                    i,
+                    self.request(i, 0x00, 0x10 | SW_ID, &PING, false, timeout),
+                )
+            })
+            .collect()
+    }
+}
+
+/// HID++ 2.0 ping (root feature, getProtocolVersion) with an arbitrary marker byte.
+const PING: [u8; 3] = [0, 0, 0x5A];
+
+/// Classifies a reply to one HID++ message: Some(reply) when it answers (idx, b2, b3).
+fn match_reply(r: &[u8], idx: u8, b2: u8, b3: u8) -> Option<Reply> {
+    if r.len() < 7 || !(r[0] == 0x10 || r[0] == 0x11) || r[1] != idx {
+        return None;
+    }
+    if r[2] == b2 && r[3] == b3 {
+        return Some(Reply::Ok(r[4..].to_vec()));
+    }
+    if (r[2] == 0xFF || r[2] == 0x8F) && r[3] == b2 && r[4] == b3 {
+        return Some(Reply::Err(r[5]));
+    }
+    None
 }
 
 fn call(l: &mut dyn Link, idx: u8, feature: u8, func: u8, params: &[u8]) -> Option<Vec<u8>> {
@@ -211,8 +244,9 @@ pub fn poll_link(
     key_suffix: &str,
 ) -> Vec<Device> {
     let indices: &[u8] = if direct { &[0xFF] } else { &[1, 2, 3, 4, 5, 6] };
+    let pings = l.ping_many(indices, Duration::from_millis(PING_MS));
     let mut out = Vec::new();
-    for &idx in indices {
+    for (idx, ping) in pings {
         let name = if direct && !product.is_empty() {
             product
         } else {
@@ -229,21 +263,16 @@ pub fn poll_link(
             Kind::Other,
             via,
         );
+        // Receiver devices drop off the link while they sleep; a cable hands them back within a minute.
+        d.grace = Duration::from_secs(if direct { 60 } else { 30 * 60 });
 
-        let ping = l.request(
-            idx,
-            0x00,
-            0x10 | SW_ID,
-            &[0, 0, 0x5A],
-            false,
-            Duration::from_millis(PING_MS),
-        );
         let found = match ping {
             Reply::Ok(p) if p.len() >= 3 && p[0] >= 2 => {
                 read_name_and_type20(l, idx, &mut d);
                 let ok = read_battery20(l, idx, &mut d);
-                if ok && let Some(unit) = read_unit_id20(l, idx) {
-                    d.key = format!("logi:unit:{unit}");
+                if ok {
+                    let unit = read_unit_id20(l, idx);
+                    d.key = stable_key(&d.key, unit);
                 }
                 ok
             }
@@ -258,6 +287,26 @@ pub fn poll_link(
         }
     }
     out
+}
+
+/// Unit-id key for a receiver slot, remembered so one failed unit-id read does not change the key
+/// (the tracker would then show the old key as a second, sleeping copy of the same device).
+static UNIT_KEYS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+fn stable_key(slot_key: &str, unit: Option<String>) -> String {
+    let mut guard = UNIT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    match unit {
+        Some(u) => {
+            let key = format!("logi:unit:{u}");
+            map.insert(slot_key.to_string(), key.clone());
+            key
+        }
+        None => map
+            .get(slot_key)
+            .cloned()
+            .unwrap_or_else(|| slot_key.to_string()),
+    }
 }
 
 fn guess_kind(name: &str) -> Kind {
@@ -277,7 +326,13 @@ fn guess_kind(name: &str) -> Kind {
 struct HidLink {
     short: Option<HidDevice>,
     long: Option<HidDevice>,
+    /// After this, requests return NoAnswer at once, so a stalled device cannot push the whole driver
+    /// past the registry's deadline and take the devices already read down with it.
+    deadline: Instant,
 }
+
+/// Total time this driver spends per poll; stays under registry::DRIVER_TIMEOUT (5 s).
+const POLL_BUDGET: Duration = Duration::from_secs(4);
 
 impl Link for HidLink {
     fn request(
@@ -289,6 +344,9 @@ impl Link for HidLink {
         force_short: bool,
         timeout: Duration,
     ) -> Reply {
+        if Instant::now() >= self.deadline {
+            return Reply::NoAnswer;
+        }
         let use_long = self.long.is_some() && !force_short;
         let (len, report) = if use_long { (20, 0x11) } else { (7, 0x10) };
         let Some(dev) = (if use_long { &self.long } else { &self.short }) else {
@@ -302,27 +360,65 @@ impl Link for HidLink {
         if dev.write(&msg).is_err() {
             return Reply::NoAnswer;
         }
-        let end = Instant::now() + timeout;
-        let mut buf = [0u8; 64];
+        let end = (Instant::now() + timeout).min(self.deadline);
         while Instant::now() < end {
-            for d in [&self.long, &self.short].into_iter().flatten() {
-                let n = match d.read_timeout(&mut buf, 15) {
-                    Ok(n) if n >= 7 => n,
-                    _ => continue,
-                };
-                let r = &buf[..n];
-                if !(r[0] == 0x10 || r[0] == 0x11) || r[1] != idx {
-                    continue;
-                }
-                if r[2] == b2 && r[3] == b3 {
-                    return Reply::Ok(r[4..].to_vec());
-                }
-                if (r[2] == 0xFF || r[2] == 0x8F) && r[3] == b2 && r[4] == b3 {
-                    return Reply::Err(r[5]);
-                }
+            if let Some(r) = self.read_any().and_then(|r| match_reply(&r, idx, b2, b3)) {
+                return r;
             }
         }
         Reply::NoAnswer
+    }
+
+    fn ping_many(&mut self, indices: &[u8], timeout: Duration) -> Vec<(u8, Reply)> {
+        let mut out: Vec<(u8, Reply)> = indices.iter().map(|&i| (i, Reply::NoAnswer)).collect();
+        let Some(dev) = self.long.as_ref().or(self.short.as_ref()) else {
+            return out;
+        };
+        let (len, report) = if self.long.is_some() {
+            (20, 0x11)
+        } else {
+            (7, 0x10)
+        };
+        let mut pending = Vec::new();
+        for &idx in indices {
+            let mut msg = vec![0u8; len];
+            msg[..7].copy_from_slice(&[report, idx, 0x00, 0x10 | SW_ID, PING[0], PING[1], PING[2]]);
+            if dev.write(&msg).is_ok() {
+                pending.push(idx);
+            }
+        }
+        let end = (Instant::now() + timeout).min(self.deadline);
+        while !pending.is_empty() && Instant::now() < end {
+            let Some(r) = self.read_any() else { continue };
+            let Some(pos) = pending
+                .iter()
+                .position(|&i| match_reply(&r, i, 0x00, 0x10 | SW_ID).is_some())
+            else {
+                continue;
+            };
+            let idx = pending.remove(pos);
+            if let Some(reply) = match_reply(&r, idx, 0x00, 0x10 | SW_ID)
+                && let Some(slot) = out.iter_mut().find(|(i, _)| *i == idx)
+            {
+                slot.1 = reply;
+            }
+        }
+        out
+    }
+}
+
+impl HidLink {
+    /// One input report from either collection, waiting at most 15 ms on each.
+    fn read_any(&self) -> Option<Vec<u8>> {
+        let mut buf = [0u8; 64];
+        for d in [&self.long, &self.short].into_iter().flatten() {
+            if let Ok(n) = d.read_timeout(&mut buf, 15)
+                && n >= 7
+            {
+                return Some(buf[..n].to_vec());
+            }
+        }
+        None
     }
 }
 
@@ -341,7 +437,8 @@ fn physical_key(path: &str) -> String {
     format!("{hw}#{inst}")
 }
 
-pub fn poll(api: &HidApi) -> Vec<Device> {
+/// Polls the Logitech HID collections the dispatcher assigned to this driver.
+pub fn poll(api: &HidApi, infos: &[DeviceInfo]) -> Vec<Device> {
     struct Group {
         pid: u16,
         product: String,
@@ -350,7 +447,7 @@ pub fn poll(api: &HidApi) -> Vec<Device> {
         long: Option<std::ffi::CString>,
     }
     let mut groups: Vec<(String, Group)> = Vec::new();
-    for info in api.device_list().filter(|i| i.vendor_id() == VID) {
+    for info in infos {
         let (page, usage) = (info.usage_page(), info.usage());
         let is_short = page == 0xFF00 && usage == 0x0001;
         let is_long = (page == 0xFF00 && usage == 0x0002) || (page == 0xFF43 && usage == 0x0202);
@@ -384,12 +481,14 @@ pub fn poll(api: &HidApi) -> Vec<Device> {
         }
     }
 
+    let deadline = Instant::now() + POLL_BUDGET;
     let mut out = Vec::new();
     let mut seen_pid: Vec<u16> = Vec::new();
     for (_, g) in groups {
         let mut link = HidLink {
             short: g.short.as_ref().and_then(|p| api.open_path(p).ok()),
             long: g.long.as_ref().and_then(|p| api.open_path(p).ok()),
+            deadline,
         };
         if link.short.is_none() && link.long.is_none() {
             continue;
@@ -398,7 +497,7 @@ pub fn poll(api: &HidApi) -> Vec<Device> {
         // A device answering a HID++ 2.0 ping at 0xFF is connected directly; otherwise it is a receiver.
         let direct = g.bluetooth
             || (!receiver
-                && matches!(link.request(0xFF, 0x00, 0x10 | SW_ID, &[0, 0, 0x5A], false, Duration::from_millis(PING_MS)),
+                && matches!(link.request(0xFF, 0x00, 0x10 | SW_ID, &PING, false, Duration::from_millis(PING_MS)),
                     Reply::Ok(ref p) if p.len() >= 3 && p[0] >= 2));
         let n = seen_pid.iter().filter(|p| **p == g.pid).count();
         let suffix = if n == 0 {
@@ -534,6 +633,17 @@ mod tests {
         let devices = poll_link(&mut Fake(m), 0xC52B, "", false, "");
         assert_eq!(devices.len(), 1);
         assert_eq!((devices[0].percent, devices[0].charging), (Some(55), true));
+    }
+
+    #[test]
+    fn key_stays_stable_when_unit_id_read_fails_once() {
+        // A pid no other test uses: the unit-key cache is process-wide.
+        let mut fake = superlight_on_receiver();
+        let first = poll_link(&mut fake, 0xBEEF, "", false, "")[0].key.clone();
+        fake.0.remove(&(1, 0x02, f(0), 0)); // unit id read now times out
+        let second = poll_link(&mut fake, 0xBEEF, "", false, "")[0].key.clone();
+        assert_eq!(first, "logi:unit:ABCD1234");
+        assert_eq!(second, first);
     }
 
     #[test]
