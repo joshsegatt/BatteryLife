@@ -703,7 +703,8 @@ pub fn poll(
     sources: &'static [Source],
     timeout: Duration,
 ) -> Vec<Device> {
-    // Index drivers.len() is the fallback, which gets everything no vendor driver matched.
+    // Index drivers.len() is the fallback, which gets everything no vendor driver matched (and,
+    // after the vendor drivers ran, the products they did not recognise).
     let mut assigned: Vec<Vec<DeviceInfo>> = vec![Vec::new(); drivers.len() + 1];
     for info in api.device_list() {
         let i = pick(drivers, info.vendor_id(), info.product_id()).unwrap_or(drivers.len());
@@ -712,11 +713,12 @@ pub fn poll(
 
     let (tx, rx) = mpsc::channel::<(usize, Vec<Device>)>();
     let mut jobs: Vec<(usize, &'static str)> = Vec::new();
-    for (i, infos) in assigned.iter().enumerate() {
+    // Vendor drivers run in parallel now; the fallback runs after them (below), because it also
+    // gets the products of vendor drivers that did not recognise them.
+    for (i, (driver, infos)) in drivers.iter().zip(&assigned).enumerate() {
         if infos.is_empty() {
             continue;
         }
-        let driver = drivers.get(i).unwrap_or(fallback);
         let (tx, api, infos) = (tx.clone(), api.clone(), infos.clone());
         if spawn(driver.name, move || {
             let _ = tx.send((i, (driver.poll)(&api, &infos)));
@@ -751,6 +753,19 @@ pub fn poll(
             eprintln!("driver {name} missed the {} s deadline", timeout.as_secs());
         }
     }
+    // A product counts as claimed only once its driver reports something (BatteryHub's rule): the
+    // products of a vendor driver that answered with no device also go to the generic fallback,
+    // so an unknown model of a whole-vendor match can still be read through standard HID.
+    // A driver that missed the deadline is still running on its handles and is left alone.
+    let mut fallback_infos = assigned[drivers.len()].clone();
+    for (i, devices) in &results {
+        if *i < drivers.len() && devices.is_empty() {
+            fallback_infos.extend(assigned[*i].iter().cloned());
+        }
+    }
+    if !fallback_infos.is_empty() {
+        results.push((drivers.len(), (fallback.poll)(&api, &fallback_infos)));
+    }
     results.sort_by_key(|(i, _)| *i);
 
     // Physical devices (Windows container ids) a HID driver reported, so the same device seen
@@ -774,7 +789,7 @@ pub fn poll(
     let vendor = containers(&|i| i < drivers.len());
     // The generic HID reading of a Bluetooth device loses to Windows' own level for it.
     let generic: Vec<(String, String)> = if has_bt {
-        assigned[drivers.len()]
+        fallback_infos
             .iter()
             .filter_map(|info| {
                 let c = bluetooth::container_of(info.path())?;
