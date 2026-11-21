@@ -8,6 +8,8 @@
 #ifndef SourceDir
   #error Pass /DSourceDir=<folder with BatteryLife.exe>
 #endif
+; Windows file versions are numeric only: "0.3.0-beta" becomes "0.3.0" there.
+#define NumericVersion Pos("-", AppVersion) > 0 ? Copy(AppVersion, 1, Pos("-", AppVersion) - 1) : AppVersion
 #ifndef OutputDir
   #define OutputDir "."
 #endif
@@ -21,7 +23,7 @@ AppVerName=BatteryLife {#AppVersion}
 AppPublisher=Josh Segatt
 AppPublisherURL=https://github.com/joshsegatt/BatteryLife
 AppSupportURL=https://github.com/joshsegatt/BatteryLife/issues
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
 ; %LOCALAPPDATA%\Programs\BatteryLife for a per-user install.
 DefaultDirName={autopf}\BatteryLife
 DisableDirPage=yes
@@ -71,8 +73,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\BatteryLife"; ValueType: none; Flags: uninsdeletekey
 
 [Run]
-Filename: "{app}\BatteryLife.exe"; Parameters: "--open"; Description: "{cm:LaunchProgram,BatteryLife}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\BatteryLife.exe"; Description: "{cm:LaunchProgram,BatteryLife}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; The tray app has no window to close politely; stop it so its files can be removed.
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM BatteryLife.exe /IM batterylife-core.exe"; Flags: runhidden; RunOnceId: "StopBatteryLife"
+; The tray app has no window to close politely; stop this copy (not a portable one elsewhere) so
+; its files can be removed.
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Get-Process BatteryLife, batterylife-core -ErrorAction SilentlyContinue | Where-Object Path -like '{app}\*' | Stop-Process -Force"""; Flags: runhidden; RunOnceId: "StopBatteryLife"

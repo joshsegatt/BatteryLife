@@ -25,7 +25,8 @@
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.4.1" />
     <!-- Windows App SDK parts the app never calls (on-device AI, ML, semantic search, widgets).
          Excluding them here, plus DropUnusedWinAppSdkParts below, keeps about 58 MB out of the
-         install. -->
+         install. Bump these versions together with Microsoft.WindowsAppSDK, or the build fails
+         with a package downgrade error (NU1605). -->
     <PackageReference Include="Microsoft.WindowsAppSDK.AI" Version="2.7.0" ExcludeAssets="all" />
     <PackageReference Include="Microsoft.WindowsAppSDK.ML" Version="2.7.0" ExcludeAssets="all" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Search" Version="2.7.0" ExcludeAssets="all" />
