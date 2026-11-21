@@ -40,7 +40,15 @@ public partial class App : Application
             return;
         }
         _ui = DispatcherQueue.GetForCurrentThread();
-        _text = Text.For(CultureInfo.CurrentUICulture);
+        // "--lang en" / "--lang pt-BR" overrides the Windows display language (screenshots, testing).
+        var langArg = Environment.GetCommandLineArgs().SkipWhile(a => a != "--lang").Skip(1).FirstOrDefault();
+        CultureInfo culture = CultureInfo.CurrentUICulture;
+        if (langArg is not null)
+        {
+            try { culture = new CultureInfo(langArg); }
+            catch (CultureNotFoundException) { }
+        }
+        _text = Text.For(culture);
         _flyout = new FlyoutWindow(_text, () => _core?.Refresh(), Quit);
 
         // Left click opens the hub; right click shows the native Windows menu, as tray users expect.

@@ -10,12 +10,12 @@ BatteryLife sits in the Windows 11 tray and answers one question at a glance: *w
 [![Report a device](https://img.shields.io/badge/Report-a%20device-2EA44F)](https://github.com/joshsegatt/BatteryLife/issues/new)
 
 <p>
-  <img src="docs/images/panel-action.png" alt="BatteryLife panel (Portuguese UI) when a headset needs charging: a yellow band reads 'Carregue o headset antes de jogar' (charge the headset before you play) and '2 h 10 min', with the other devices listed below" width="380">
+  <img src="docs/images/panel-action-en.png" alt="BatteryLife panel when a headset needs charging: a yellow band reads 'Charge the headset before you play' and '2 h 10 min', with the other devices listed below" width="380">
   &nbsp;&nbsp;
-  <img src="docs/images/panel-calm.png" alt="BatteryLife panel (Portuguese UI) when nothing needs charging: a calm black band reads 'Nada para carregar agora' (nothing to charge right now) and shows the next device to run out in 21 hours" width="380">
+  <img src="docs/images/panel-calm-en.png" alt="BatteryLife panel when nothing needs charging: a calm black band reads 'Nothing to charge right now' and shows the next device to run out in 21 hours" width="380">
 </p>
 
-<sub>Screenshots use the app's built-in demo data (`BatteryLife.exe --demo`), not real readings. The UI follows the Windows display language (English or Portuguese).</sub>
+<sub>Screenshots use the app's built-in demo data (`BatteryLife.exe --demo`), not real readings. The UI follows the Windows display language (English or Portuguese); `--lang en` forces one.</sub>
 
 ## Why another battery app
 
@@ -111,7 +111,7 @@ Design decisions live in [`PRODUCT.md`](PRODUCT.md) and [`DESIGN.md`](DESIGN.md)
 
 ## Help wanted
 
-- **Test with your hardware:** run `batterylife-core --list` and tell us what it shows. This is the most valuable contribution right now.
+- **Test with your hardware:** build the reader (see [Install](#install), step 2), run `core/target/release/batterylife-core.exe --list` and tell us what it shows. This is the most valuable contribution right now.
 - **Report a device we don't read:** [open an issue](https://github.com/joshsegatt/BatteryLife/issues/new) with the output of `batterylife-core --list` and the device name.
 - **Translate:** all text lives in [`app/BatteryLife.Logic/Text.cs`](app/BatteryLife.Logic/Text.cs).
 - **Code:** read [`CLAUDE.md`](CLAUDE.md) for the layout and the checks CI runs. Open a pull request with one change at a time.
@@ -135,3 +135,5 @@ BatteryLife is free software under the [GNU General Public License v3.0](LICENSE
 ### Em português
 
 O BatteryLife mostra, na bandeja do Windows 11, qual aparelho sem fio vai acabar primeiro e quanto tempo ele ainda tem. A faixa fica preta e calma quando está tudo bem e amarela só quando algo precisa carregar. Ele lê mouses, headsets, teclados, controles e o celular (pelo Phone Link), e nunca muda configuração nenhuma do aparelho. Achou um aparelho que não aparece? [Abra uma issue](https://github.com/joshsegatt/BatteryLife/issues/new).
+
+<img src="docs/images/panel-action.png" alt="Painel do BatteryLife em português, com a faixa amarela 'Carregue o headset antes de jogar' e '2 h 10 min'" width="380">
